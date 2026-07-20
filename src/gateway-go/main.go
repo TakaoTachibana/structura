@@ -20,6 +20,7 @@ func main() {
 
 	fmt.Printf("[gateway-go] High-throughput UDP Gateway runnning on %s...\n", addr)
 	err := receiver.Start(ctx, func(data []byte) {
+		fmt.Printf("[gateway-go] Received UDP Packet (%d bytes): %s\n", len(data), string(data))
 	})
 
 	if err != nil && err != context.Canceled {
