@@ -1,8 +1,7 @@
 using System;
-using System.Threading;
+using System.IO;
+using System.Net.Sockets;
 using System.Threading.Tasks;
-using Structura.Core.Buffers;
-using Structura.Core.Ipc;
 
 namespace Structura.Core;
 
@@ -10,22 +9,28 @@ internal class Program {
 	private const string SocketPath = "/tmp/structura.sock";
 
 	static async Task Main(string[] args) {
+		if (File.Exists(SocketPath)) {
+			File.Delete(SocketPath);
+		}
+
 		Console.WriteLine("=== Structura Backend Core (.NET 10) ===");
-		using var cts = new CancellationTokenSource();
-		Console.CancelKeyPress += (s, e) => {
-			e.Cancel = true;
-			cts.Cancel();
-		};
+		using var listenSocket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+		listenSocket.Bind(new UnixDomainSocketEndPoint(SocketPath));
+		listenSocket.Listen(10);
 
-		var buffer = new AllocationFreeBuffer(1024 * 1024);
-		var ipcListener = new UnixDomainSocketListener(SocketPath, buffer);
-		Task listenerTask = ipcListener.StartAsync(cts.Token);
-		Console.WriteLine("Press Ctrl+C to exit.");
+		Console.WriteLine($"[C# Core] Waiting for Go Gateway connection on {SocketPath}...");
 
-		try {
-			await listenerTask;
-		} catch (OperationCanceledException) {
-			Console.WriteLine("Shutting down gracefully...");
+		using var clientSocket = await listenSocket.AcceptAsync();
+		Console.WriteLine("[C# Core] Gateway connected. Zero-Alloc evaluation loop running...");
+
+		var buffer = new byte[1024];
+
+		while (true) {
+			int readBytes = await clientSocket.ReceiveAsync(buffer, SocketFlags.None);
+			if (readBytes == 0) {
+				break;
+			}
+			PacketProcessor.ProcessBuffer(buffer.AsSpan(0, readBytes));
 		}
 	}
 }
