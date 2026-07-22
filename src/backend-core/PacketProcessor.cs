@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Structura.Core;
@@ -13,25 +14,27 @@ public static class PacketProcessor {
 	private static readonly Stopwatch _stopwatch = Stopwatch.StartNew();
 	private static long _lastReportTimeMs = 0;
 
+	public static WebBroadcaster Broadcaster { get; } = new();
+
 	public static void ProcessBuffer(ReadOnlySpan<byte> buffer) {
 		int packetSize = Marshal.SizeOf<TelemetryPacket>();
 
-		if (buffer.Length < packetSize) {
-			return;
-		}
+		while (buffer.Length >= packetSize) {
+			ref readonly var packet = ref MemoryMarshal.AsRef<TelemetryPacket>(buffer[..packetSize]);
 
-		ref readonly var packet = ref MemoryMarshal.AsRef<TelemetryPacket>(buffer[..packetSize]);
+			if (packet.IsValid) {
+				_packetCount++;
 
-		if (!packet.IsValid) {
-			return;
-		}
+				bool isCpuAlert = packet.CpuUsage >= CpuCriticalThreshold;
+				bool isMemAlert = packet.MemoryUsage >= MemoryCriticalThreshold;
 
-		_packetCount++;
-		bool isCpuAlert = packet.CpuUsage >= CpuCriticalThreshold;
-		bool isMemAlert = packet.MemoryUsage >= MemoryCriticalThreshold;
+				if (isCpuAlert || isMemAlert) {
+					_alertCount++;
+				}
 
-		if (isCpuAlert || isMemAlert) {
-			_alertCount++;
+				Broadcaster.BroadcastBuffer(buffer[..packetSize]);
+			}
+			buffer = buffer[packetSize..];
 		}
 
 		long currentMs = _stopwatch.ElapsedMilliseconds;

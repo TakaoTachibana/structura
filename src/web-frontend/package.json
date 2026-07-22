@@ -1,0 +1,20 @@
+{
+  "name": "web-frontend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+		"dev": "rspack dev",
+		"build": "rspack build"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@rspack/cli": "^2.1.5",
+    "@rspack/core": "^2.1.5",
+    "@rspack/dev-server": "^2.1.0",
+    "typescript": "^7.0.2"
+  }
+}

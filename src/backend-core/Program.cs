@@ -9,6 +9,7 @@ internal class Program {
 	private const string SocketPath = "/tmp/structura.sock";
 
 	static async Task Main(string[] args) {
+		await PacketProcessor.Broadcaster.StartAsync(8080);
 		if (File.Exists(SocketPath)) {
 			File.Delete(SocketPath);
 		}
