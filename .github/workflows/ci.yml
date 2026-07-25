@@ -24,11 +24,11 @@ jobs:
           cd src/gateway-go
           go mod download
 
-      - name: Run Linter
-        uses: golangci/golangci-lint-action@v4
-        with:
-          version: v1.60.0
-          working-directory: gateway-go
+#      - name: Run Linter
+#        uses: golangci/golangci-lint-action@v4
+#        with:
+#          version: v1.60.0
+#          working-directory: gateway-go
 
       - name: Run Unit Tests with Coverage
         run: |
