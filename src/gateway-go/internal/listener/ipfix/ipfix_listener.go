@@ -51,7 +51,7 @@ func (l *IPFIXListener) Start(ctx context.Context, dataCh chan<- listener.Teleme
 					log.Printf("[%s] Stopping IPFIX Listener...", l.Name())
 					return
 				default:
-					log.Printf("[%s] UDP Read error: %v", l.Name())
+					log.Printf("[%s] UDP Read error: %v", l.Name(), err)
 					continue
 				}
 			}

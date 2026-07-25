@@ -111,7 +111,7 @@ func (c *AnalyticsClient) EvaluateAll(
 	g.Go(func() error {
 		bodyBytes, err := json.Marshal(juliaReq)
 		if err != nil {
-			return fmt.Errorf("Julia request marshal error: w", err)
+			return fmt.Errorf("Julia request marshal error: %w", err)
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.juliaBaseURL+"/solve", bytes.NewBuffer(bodyBytes))
