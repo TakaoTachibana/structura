@@ -9,7 +9,13 @@ end
 
 function handle_solve(req::HTTP.Request)
 	try
-		body = JSON3.read(req.body)
+		body_str = String(req.body)
+		if isempty(body_str)
+			return HTTP.Respose(400, ["Content-Type" => "application/json"], JSON3.write(Dict("error" => "Empty request body")))
+		end
+
+		body = JSON3.read(body_str)
+
 		q0 = Float64(get(body, :initial_queue, 10.0))
 		lambda = Float64(get(body, :arrival_rate, 120.0))
 		mu = Float64(get(body, :service_rate, 100.0))
@@ -50,3 +56,4 @@ end
 println("Julia Solver API listening on http://0.0.0.0:8081 ...")
 HTTP.serve(router, "0.0.0.0", 8081)
 
+main()

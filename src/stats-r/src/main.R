@@ -2,6 +2,8 @@ library(plumber)
 library(mgcv)
 library(jsonlite)
 
+#* @post /analyze
+#* @serializer json
 function(req) {
 	raw_body <- req$postBody
 	input_data <- fromJSON(raw_body)
@@ -9,7 +11,7 @@ function(req) {
 
 	if (nrow(df) < 10) {
 		return(list(
-			status = "INSUFFICIENT_DATA"
+			status = "INSUFFICIENT_DATA",
 			criticality_score = 0.0,
 			is_phase_transition = FALSE,
 			message = "At least 10 data points are required for GAM fitting."
@@ -19,8 +21,8 @@ function(req) {
 	gam_fit <- gam(value ~ s(time, bs = "cr"), data = df)
 	residual_val <- residuals(gam_fit)
 
-	current_variance <- var(residuals_val)
-	acf_res <- acf(residuals_val, plot = FALSE, lag.max = 1)
+	current_variance <- var(residual_val)
+	acf_res <- acf(residual_val, plot = FALSE, lag.max = 1)
 	autocorr_lag1 <- ifelse(length(acf_res$acf) > 1, acf_res$acf[2], 0)
 
 	criticality_score <- current_variance * (1 + max(0, autocorr_lag1))
