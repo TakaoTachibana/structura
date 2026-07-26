@@ -1,0 +1,2867 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.github/
+  workflows/
+    ci.yml
+  PULL_REQUEST_TEMPLATE.md
+src/
+  backend-core/
+    Ipc/
+      UnixDomainSocketListener.cs
+    Structura.Core/
+      Buffers/
+        AllocationFreeBuffer.cs
+        ITraceBuffer.cs
+      Deconstruction/
+        DeconstructiveEvaluator.cs
+      Class1.cs
+      Structura.Core.csproj
+    backend-core.csproj
+    PacketProcessor.cs
+    Program.cs
+    Structura.slnx
+    TelemetryPacket.cs
+    WebBroadcaster.cs
+  gateway-go/
+    client/
+      analytics_test.go
+      analytics.go
+    handler/
+      analytics.go
+    ingest/
+      receiver_test.go
+      receiver.go
+    internal/
+      listener/
+        ebpf/
+          bpf/
+            socket_trace.c
+          ebpf_listener.go
+          gen.go
+          sockettrace_bpf.go
+          sockettrace_bpf.o
+        gnmi/
+          gnmi_listener.go
+        ipfix/
+          ipfix_listener.go
+        listener.go
+    go.mod
+    main.go
+  simulation/
+    analyze_criticality.R
+    fanaticism_simulation_log.parquet
+    fanaticism_simulation.py
+    phase_transition_plot.png
+    plot_phase_transition.py
+    r_criticality_analysis.png
+    requirements.txt
+  simulation-py/
+    app/
+      __init__.py
+      agent.py
+      client.py
+      models.py
+    main.py
+    requirement.txt
+  solver-julia/
+    src/
+      main.jl
+    Dockerfile
+  stats-r/
+    src/
+      main.R
+    Dockerfile
+  Structura.Tests/
+    BufferTests.cs
+    Structura.Tests.csproj
+    UnitTest1.cs
+  web-frontend/
+    src/
+      main.ts
+      worker.ts
+    index.html
+    main.ts
+    package.json
+    rspack.config.js
+    styles.css
+    tsconfig.json
+  docker-compose.yml
+.gitignore
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/backend-core/Ipc/UnixDomainSocketListener.cs">
+using System;
+using System.Buffers;
+using System.IO;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
+using Structura.Core.Buffers;
+
+namespace Structura.Core.Ipc;
+
+public sealed class UnixDomainSocketListener {
+	private readonly string _socketPath;
+	private readonly AllocationFreeBuffer _buffer;
+	private Socket? _listenerSocket;
+
+	public UnixDomainSocketListener(string socketPath, AllocationFreeBuffer buffer) {
+		_socketPath = socketPath;
+		_buffer = buffer;
+	}
+
+	public async Task StartAsync(CancellationToken cancellationToken) {
+		if (File.Exists(_socketPath)) {
+			File.Delete(_socketPath);
+		}
+
+		var endPoint = new UnixDomainSocketEndPoint(_socketPath);
+		_listenerSocket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+
+		_listenerSocket.Bind(endPoint);
+		_listenerSocket.Listen(128);
+
+		Console.WriteLine($"[C# Core] IPC Listener started on {_socketPath}");
+
+		try {
+			while (!cancellationToken.IsCancellationRequested) {
+				Socket clientSocket = await _listenerSocket.AcceptAsync(cancellationToken);
+				_ = HandleClientAsync(clientSocket, cancellationToken);
+			}
+		} catch (OperationCanceledException) {
+		} finally {
+			Cleanup();
+		}
+	}
+
+	private async Task HandleClientAsync(Socket clientSocket, CancellationToken cancellationToken) {
+		using (clientSocket) {
+			byte[] receiveBuffer = ArrayPool<byte>.Shared.Rent(65535);
+			try {
+				while (!cancellationToken.IsCancellationRequested) {
+					int bytesRead = await clientSocket.ReceiveAsync(
+							receiveBuffer.AsMemory(),
+							SocketFlags.None,
+							cancellationToken
+					);
+					
+					if (bytesRead == 0) {
+						break;
+					}
+
+					_buffer.Write(receiveBuffer.AsSpan(0, bytesRead));
+					Console.WriteLine($"[C# Core] IPC Received: {bytesRead} byte from Go Gateway");
+				}
+			} catch (Exception ex) when (ex is not OperationCanceledException) {
+				Console.WriteLine($"[C# Core] IPC Connection error: {ex.Message}");
+			} finally {
+				ArrayPool<byte>.Shared.Return(receiveBuffer);
+			}
+		}
+	}
+
+	private void Cleanup() {
+		_listenerSocket?.Close();
+		if (File.Exists(_socketPath)) {
+			File.Delete(_socketPath);
+		}
+		Console.WriteLine("[C# Core] IPC Listener stopped & socket cleaned up.");
+	}
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Buffers/AllocationFreeBuffer.cs">
+using System;
+using System.Buffers;
+
+namespace Structura.Core.Buffers;
+
+public sealed class AllocationFreeBuffer : ITraceBuffer {
+	private readonly int _capacity;
+	private byte[]? _rentedArray;
+	private int _writePosition;
+	private int _readPosition;
+	private int _count;
+
+	public AllocationFreeBuffer(int capacity) {
+		_capacity = capacity;
+		_rentedArray = ArrayPool<byte>.Shared.Rent(capacity);
+	}
+
+	public void Write(ReadOnlySpan<byte> data) {
+		ObjectDisposedException.ThrowIf(_rentedArray is null, this);
+
+		if (data.Length > _capacity) {
+			throw new ArgumentOutOfRangeException(nameof(data), "datasize exceeded.");
+		}
+
+		int availableSpace = _capacity - _count;
+		if (data.Length > availableSpace) {
+			_readPosition = (_readPosition + (data.Length - availableSpace)) % _capacity;
+			_count = _capacity - data.Length;
+		}
+
+		Span<byte> bufferSpan = _rentedArray.AsSpan();
+
+		if (_writePosition + data.Length <= _capacity) {
+			data.CopyTo(bufferSpan.Slice(_writePosition, data.Length));
+			_writePosition = (_writePosition + data.Length) % _capacity;
+		} else {
+			int firstPartSize = _capacity - _writePosition;
+			data[..firstPartSize].CopyTo(bufferSpan.Slice(_writePosition, firstPartSize));
+			data[firstPartSize..].CopyTo(bufferSpan[.. (data.Length - firstPartSize)]);
+			_writePosition = data.Length - firstPartSize;
+		}
+
+		_count += data.Length;
+	}
+
+	public ReadOnlySpan<byte> Read() {
+		ObjectDisposedException.ThrowIf(_rentedArray is null, this);
+		if (_count == 0) {
+			return ReadOnlySpan<byte>.Empty;
+		}
+
+		Span<byte> bufferSpan = _rentedArray.AsSpan();
+		if (_readPosition + _count <= _capacity) {
+			return bufferSpan.Slice(_readPosition, _count);
+		} else {
+			return bufferSpan.Slice(_readPosition, _capacity - _readPosition);
+		}
+	}
+
+	public void Clear() {
+		_writePosition = 0;
+		_readPosition = 0;
+		_count = 0;
+	}
+
+	public void Dispose() {
+		if (_rentedArray != null) {
+			ArrayPool<byte>.Shared.Return(_rentedArray);
+			_rentedArray = null;
+		}
+	}
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Buffers/ITraceBuffer.cs">
+using System;
+
+namespace Structura.Core.Buffers;
+
+public interface ITraceBuffer : IDisposable {
+	void Write(ReadOnlySpan<byte> data);
+	ReadOnlySpan<byte> Read();
+	void Clear();
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Deconstruction/DeconstructiveEvaluator.cs">
+using System;
+
+namespace Structura.Core.Deconstruction;
+
+public ref struct DeconstructiveEvaluator {
+	private double _logosThreshold;
+	private readonly double _chaosFactor;
+
+	public DeconstructiveEvaluator(double initialThreshold, double chaosFactor) {
+		_logosThreshold = initialThreshold;
+		_chaosFactor = chaosFactor;
+	}
+
+	public readonly double CurrentThreshold => _logosThreshold;
+
+	public void Deconstruct(ReadOnlySpan<byte> traceData) {
+		if (traceData.IsEmpty) {
+			return;
+		}
+		double signalSum = 0;
+		for (int i = 0; i < traceData.Length; i++) {
+			signalSum += traceData[i];
+		}
+		double meanSignal = signalSum / traceData.Length;
+
+		if (meanSignal > _logosThreshold) {
+			_logosThreshold -= (meanSignal - _logosThreshold) * _chaosFactor * 0.01;
+		}
+	}
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Class1.cs">
+namespace Structura.Core;
+
+public class Class1
+{
+
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Structura.Core.csproj">
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<Optimize>true</Optimize>
+  </PropertyGroup>
+
+</Project>
+</file>
+
+<file path="src/backend-core/backend-core.csproj">
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<Optimize>true</Optimize>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	</PropertyGroup>
+</Project>
+</file>
+
+<file path="src/backend-core/Structura.slnx">
+<Solution>
+  <Project Path="Structura.Core/Structura.Core.csproj" />
+  <Project Path="Structura.Tests/Structura.Tests.csproj" />
+</Solution>
+</file>
+
+<file path="src/backend-core/TelemetryPacket.cs">
+using System.Runtime.InteropServices;
+
+namespace Structura.Core;
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public readonly struct TelemetryPacket {
+	public const uint ValidMagic = 0x53545255;
+
+	public readonly uint Magic;
+	public readonly uint AgentId;
+	public readonly long Timestamp;
+	public readonly float CpuUsage;
+	public readonly float MemoryUsage;
+
+	public bool IsValid => Magic == ValidMagic;
+}
+</file>
+
+<file path="src/backend-core/WebBroadcaster.cs">
+using System;
+using System.Net;
+using System.Net.WebSockets;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Structura.Core;
+
+public class WebBroadcaster {
+	private HttpListener? _listener;
+	private WebSocket? _activeSocket;
+	private readonly CancellationTokenSource _cts = new();
+
+	public async Task StartAsync(int port = 8080) {
+		_listener = new HttpListener();
+		_listener.Prefixes.Add($"http://localhost:{port}/ws/");
+		_listener.Start();
+		Console.WriteLine($"[WebBroadcaster] High-speed WebSocket listening on ws://localhost:{port}/ws/");
+
+		_ = Task.Run(async () => {
+				while (!_cts.Token.IsCancellationRequested) {
+					try {
+						var context = await _listener.GetContextAsync();
+						if (context.Request.IsWebSocketRequest) {
+							var wsContext = await context.AcceptWebSocketAsync(subProtocol: null);
+							_activeSocket = wsContext.WebSocket;
+							Console.WriteLine("[WebBroadcaster] Frontend Client Connection via Binary Stream!");
+						}
+					} catch (Exception) {
+					}
+				}
+		}, _cts.Token);
+	}
+
+	public void BroadcastBuffer(ReadOnlySpan<byte> buffer) {
+		if (_activeSocket == null || _activeSocket.State != WebSocketState.Open) {
+			return;
+		}
+		var segment = new ArraySegment<byte>(buffer.ToArray());
+		_ = _activeSocket.SendAsync(segment, WebSocketMessageType.Binary, true, CancellationToken.None);
+	}
+
+	public void Stop() {
+		_cts.Cancel();
+		_listener?.Stop();
+	}
+}
+</file>
+
+<file path="src/gateway-go/client/analytics_test.go">
+package client
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestEvaluateAll_Success(t *testing.T) {
+	rServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"status": ["SUCCESS"],
+			"is_phase_transition": [false],
+			"metrics": {"variance": [0.0015], "autocorrelation": [-0.8099], "criticality_score": [0.0]},
+			"timestamp": ["2026-07-25 12:00:00"]
+		}`))
+	}))
+	defer rServer.Close()
+
+	juliaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"status": "SUCCESS",
+			"time_steps": [0.0, 5.0],
+			"predicted_queue": [10.0, 260.0],
+			"terminal_queue": 260.0,
+			"overflow_risk": true
+		}`))
+	}))
+	defer juliaServer.Close()
+
+	client := NewAnalyticsClient(rServer.URL, juliaServer.URL)
+	res, err := client.EvaluateAll(context.Background(), []MetricPoint{{Time: 1, Value: 10}}, JuliaSolveRequest{})
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if res.PhaseTransition.Status != "SUCCESS" {
+		t.Errorf("Expected status SUCCESS, got %s", res.PhaseTransition.Status)
+	}
+}
+</file>
+
+<file path="src/gateway-go/handler/analytics.go">
+package handler
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"gateway-go/client"
+)
+
+type AnalyticsHandler struct {
+	client *client.AnalyticsClient
+}
+
+func NewAnalyticsHandler(c *client.AnalyticsClient) *AnalyticsHandler {
+	return &AnalyticsHandler{client: c}
+}
+
+type EvalRequestPayload struct {
+	Metrics []client.MetricPoint `json:"metrics"`
+	SolverParams client.JuliaSolveRequest `json:"solver_params"`
+}
+
+func (h *AnalyticsHandler) HandleEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload EvalRequestPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON body: "+ err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	res, err := h.client.EvaluateAll(r.Context(), payload.Metrics, payload.SolverParams)
+	if err != nil {
+		http.Error(w, "Analytics comutation failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "appliaction/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(res)
+}
+</file>
+
+<file path="src/gateway-go/ingest/receiver_test.go">
+package ingest
+
+import (
+	"testing"
+)
+
+func BenchmarkPacketReceiver_PoolAllocation(b *testing.B) {
+	receiver := NewPacketReceiver("127.0.0.1")
+	testData := []byte("LOG_LEVEL=WARN msg='Logos threshold shifting initiated'")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		bufPtr := receiver.pool.Get().(*[]byte)
+		buf := *bufPtr
+
+		copy(buf, testData)
+
+		receiver.pool.Put(bufPtr)
+	}
+}
+</file>
+
+<file path="src/gateway-go/ingest/receiver.go">
+package ingest
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"sync"
+)
+
+const MaxUDPBufferSize = 65535
+
+type PacketReceiver struct {
+	addr string
+	pool *sync.Pool
+}
+
+func NewPacketReceiver(addr string) *PacketReceiver {
+	return &PacketReceiver {
+		addr : addr,
+		pool: &sync.Pool {
+			New: func() any {
+				b := make([]byte, MaxUDPBufferSize)
+				return &b
+			},
+		},
+	}
+}
+
+func (r *PacketReceiver) Start(ctx context.Context, handler func([]byte)) error {
+	pc, err := net.ListenPacket("udp", r.addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen UDP: %w", err)
+	}
+	defer pc.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			bufPtr := r.pool.Get().(*[]byte)
+			buf := *bufPtr
+
+			n, _, err := pc.ReadFrom(buf)
+			if err != nil {
+				r.pool.Put(bufPtr)
+				continue
+			}
+			handler(buf[:n])
+			r.pool.Put(bufPtr)
+		}
+	}
+}
+</file>
+
+<file path="src/gateway-go/internal/listener/ebpf/bpf/socket_trace.c">
+// +build ignore
+
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+
+struct socket_event {
+	__u32 pid;
+	char comm[16];
+	__u64 timestamp_ns;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 24);
+} events SEC(".maps");
+
+SEC("kprobe/tcp_v4_connect")
+int kprobe__tcp_v4_connect(void *ctx) {
+	struct socket_event *event;
+
+	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	if (!event) {
+		return 0;
+	}
+
+	event->pid = bpf_get_current_pid_tgid() >> 32;
+	bpf_get_current_comm(&event->comm, sizeof(event->comm));
+	event->timestamp_ns = bpf_ktime_get_ns();
+
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+char LICENSE[] SEC("license") = "GPL";
+</file>
+
+<file path="src/gateway-go/internal/listener/ebpf/ebpf_listener.go">
+package ebpf
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
+	"log"
+	"strconv"
+
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
+	"gateway-go/internal/listener"
+)
+
+type socketEvent struct {
+	Pid uint32
+	Comm [16]byte
+	TimestampNs uint64
+}
+
+type EBPFListener struct {
+	objs socketTraceObjects
+	kp link.Link
+}
+
+func NewEBPFListener() *EBPFListener {
+	return &EBPFListener{}
+}
+
+func (l *EBPFListener) Name() string {
+	return "eBPF-Kernel-Listener"
+}
+
+func (l *EBPFListener) Start(ctx context.Context, dataCh chan<- listener.TelemetryData) error {
+	log.Printf("[%s] Loading BPF objects into Linux kernel...", l.Name())
+
+	if err := loadSocketTraceObjects(&l.objs, nil); err != nil {
+		return err 
+	}
+
+	kp, err := link.Kprobe("tcp_v4_connect", l.objs.KprobeTcpV4Connect, nil)
+	if err != nil {
+		l.objs.Close()
+		return err
+	}
+	l.kp = kp
+
+	rd, err := ringbuf.NewReader(l.objs.Events)
+	if err != nil {
+		l.kp.Close()
+		l.objs.Close()
+		return err
+	}
+
+	log.Printf("[%s] Successfully attached kprobe to tcp_v4_connect! Listening for real socket event...", l.Name())
+
+
+	go func() {
+		defer func() {
+			rd.Close()
+			l.kp.Close()
+			l.objs.Close()
+		}()
+
+		go func() {
+			<-ctx.Done()
+			rd.Close()
+		}()
+
+		for {
+			record, err := rd.Read()
+			if err != nil {
+				if errors.Is(err, ringbuf.ErrClosed) {
+					log.Printf("[%s] RingBuffer closed, exiting reader...", l.Name())
+					return
+				}
+				log.Printf("[%s] RingBuffer read error: %v", l.Name(), err)
+				continue
+			}
+
+			var event socketEvent
+			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+				log.Printf("[%s] Failed to parse ringbuf record: %v", l.Name(), err)
+				continue
+			}
+
+			commStr := string(bytes.TrimRight(event.Comm[:], "\x00"))
+
+
+			dataCh <- listener.TelemetryData {
+				Timestamp: int64(event.TimestampNs),
+				Source: "ebpf",
+				Metric: "kernel_tcp_connect_event",
+				Value: 1.0,
+				Tags: map[string]string {
+					"pid": strconv.Itoa(int(event.Pid)),
+					"comm": commStr,
+				},
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (l *EBPFListener) Stop() error {
+	return nil
+}
+</file>
+
+<file path="src/gateway-go/internal/listener/ebpf/gen.go">
+package ebpf
+
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpf socketTrace bpf/socket_trace.c
+</file>
+
+<file path="src/gateway-go/internal/listener/ebpf/sockettrace_bpf.go">
+// Code generated by bpf2go; DO NOT EDIT.
+
+package ebpf
+
+import (
+	"bytes"
+	_ "embed"
+	"fmt"
+	"io"
+
+	"github.com/cilium/ebpf"
+)
+
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	socketTraceMapEvents              = "events"
+	socketTraceProgKprobeTcpV4Connect = "kprobe__tcp_v4_connect"
+)
+
+// loadSocketTrace returns the embedded CollectionSpec for socketTrace.
+func loadSocketTrace() (*ebpf.CollectionSpec, error) {
+	reader := bytes.NewReader(_SocketTraceBytes)
+	spec, err := ebpf.LoadCollectionSpecFromReader(reader)
+	if err != nil {
+		return nil, fmt.Errorf("can't load socketTrace: %w", err)
+	}
+
+	return spec, err
+}
+
+// loadSocketTraceObjects loads socketTrace and converts it into a struct.
+//
+// The following types are suitable as obj argument:
+//
+//	*socketTraceObjects
+//	*socketTracePrograms
+//	*socketTraceMaps
+//
+// See ebpf.CollectionSpec.LoadAndAssign documentation for details.
+func loadSocketTraceObjects(obj any, opts *ebpf.CollectionOptions) error {
+	spec, err := loadSocketTrace()
+	if err != nil {
+		return err
+	}
+
+	return spec.LoadAndAssign(obj, opts)
+}
+
+// socketTraceSpecs contains maps and programs before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type socketTraceSpecs struct {
+	socketTraceProgramSpecs
+	socketTraceMapSpecs
+	socketTraceVariableSpecs
+}
+
+// socketTraceProgramSpecs contains programs before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type socketTraceProgramSpecs struct {
+	KprobeTcpV4Connect *ebpf.ProgramSpec `ebpf:"kprobe__tcp_v4_connect"`
+}
+
+// socketTraceMapSpecs contains maps before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type socketTraceMapSpecs struct {
+	Events *ebpf.MapSpec `ebpf:"events"`
+}
+
+// socketTraceVariableSpecs contains global variables before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type socketTraceVariableSpecs struct {
+}
+
+// socketTraceObjects contains all objects after they have been loaded into the kernel.
+//
+// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type socketTraceObjects struct {
+	socketTracePrograms
+	socketTraceMaps
+	socketTraceVariables
+}
+
+func (o *socketTraceObjects) Close() error {
+	return _SocketTraceClose(
+		&o.socketTracePrograms,
+		&o.socketTraceMaps,
+	)
+}
+
+// socketTraceMaps contains all maps after they have been loaded into the kernel.
+//
+// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type socketTraceMaps struct {
+	Events *ebpf.Map `ebpf:"events"`
+}
+
+func (m *socketTraceMaps) Close() error {
+	return _SocketTraceClose(
+		m.Events,
+	)
+}
+
+// socketTraceVariables contains all global variables after they have been loaded into the kernel.
+//
+// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type socketTraceVariables struct {
+}
+
+// socketTracePrograms contains all programs after they have been loaded into the kernel.
+//
+// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type socketTracePrograms struct {
+	KprobeTcpV4Connect *ebpf.Program `ebpf:"kprobe__tcp_v4_connect"`
+}
+
+func (p *socketTracePrograms) Close() error {
+	return _SocketTraceClose(
+		p.KprobeTcpV4Connect,
+	)
+}
+
+func _SocketTraceClose(closers ...io.Closer) error {
+	for _, closer := range closers {
+		if err := closer.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Do not access this directly.
+//
+//go:embed sockettrace_bpf.o
+var _SocketTraceBytes []byte
+</file>
+
+<file path="src/gateway-go/internal/listener/gnmi/gnmi_listener.go">
+package gnmi
+
+import (
+	"context"
+	"log"
+	"math/rand"
+	"time"
+
+	"gateway-go/internal/listener"
+)
+
+type GNMIListener struct {
+	running bool
+}
+
+func NewGNMIListener() *GNMIListener {
+	return &GNMIListener{}
+}
+
+func (l *GNMIListener) Name() string {
+	return "gNMI-gRPC-Listener"
+}
+
+func (l *GNMIListener) Start(ctx context.Context, dataCh chan<- listener.TelemetryData) error {
+	l.running = true
+	log.Printf("[%s] Initializing gNMI gRPC Telemetry Stream Subscriptions...", l.Name())
+
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("[%s] Stopping gNMI Listener...", l.Name())
+				return
+			case t := <-ticker.C:
+				simulatedInOctets := float64(1000000 + rand.Intn(500000))
+
+				dataCh <- listener.TelemetryData {
+					Timestamp: t.UnixNano(),
+					Source: "gnmi",
+					Metric: "interface_in_octets_bytes",
+					Value: simulatedInOctets,
+					Tags: map[string]string {
+						"device": "core-router-01",
+						"interface": "Ethernet1/1",
+					},
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (l *GNMIListener) Stop() error {
+	l.running = false
+	return nil
+}
+</file>
+
+<file path="src/gateway-go/internal/listener/listener.go">
+package listener
+
+import "context"
+
+type TelemetryData struct {
+	Timestamp int64 `json:"timestamp"`
+	Source string `json:"source"`
+	Metric string `json:"metric"`
+	Value float64 `json:"value"`
+	Tags map[string]string `json:"tags"`
+}
+
+type TelemetryListener interface {
+	Name() string
+	Start(ctx context.Context, dataCh chan<- TelemetryData) error
+	Stop() error
+}
+</file>
+
+<file path="src/simulation/analyze_criticality.R">
+library(arrow)
+library(tidyverse)
+library(mgcv)
+
+df <- read_parquet("fanaticism_simulation_log.parquet")
+gam_model <- gam(order_parameter_m ~ s(temperature_T, k = 15), data = df)
+T_grid <- seq(min(df$temperature_T), max(df$temperature_T), length.out = 1000)
+eps <- 1e-5
+pred_m <- predict(gam_model, newdata = data.frame(temperature_T = T_grid))
+pred_m_eps <- predict(gam_model, newdata = data.frame(temperature_T = T_grid + eps))
+dm_dT <- (pred_m_eps - pred_m) / eps
+tc_index <- which.max(abs(dm_dT))
+Tc <- T_grid[tc_index]
+cat("\n============================\n")
+cat(sprintf("[Completed] Detected Tc: %.4f\n", Tc))
+cat("============================\n\n")
+
+analysis_df <- data.frame(T = T_grid, m = pred_m, slope = abs(dm_dT))
+
+p <- ggplot() +
+	geom_point(data = df, aes(x = temperature_T, y = order_parameter_m), alpha = 0.3, color = "gray30") +
+	geom_line(data = analysis_df, aes(x = T, y = m), color = "purple", size = 1.2) +
+	geom_vline(xintercept = Tc, color = "red", linetype = "dashed", size = 1) +
+	annotate("text", x = Tc + 0.15, y = 0, label = sprintf("Tc ~ %.3f", Tc), color = "red", fontface = "bold", size = 5) +
+	scale_x_reverse() +
+	labs(
+			 title = "Non-Linear GAM Fitting & Critical Boundary (Tc) Detection",
+			 subtitle = "Red dashed line indicates the inflection point where phase transition accelerates.",
+			 x = "Social Stress / Temprature (T)",
+			 y = "Order Parameter (m)"
+	) +
+	theme_minimal()
+
+ggsave("r_criticality_analysis.png", plot = p, width = 8, height = 5, dpi = 300)
+cat("Plot saved as 'r_criticality_analysis.png'.\n")
+</file>
+
+<file path="src/simulation/fanaticism_simulation.py">
+import numpy as np
+import pandas as pd
+from scipy.stats import gumbel_r
+
+class CelebrityFanaticismSim:
+	def __init__(self, num_agents=10000, alpha=0.3, gamma=1.5, mu_bias=0.25):
+		self.N = num_agents
+		self.alpha = alpha
+		self.gamma = gamma
+		self.mu_bias = mu_bias
+
+		self.states = np.random.choice([-1, 1], size=self.N, p=[0.9, 0.1])
+
+		self.A_i = 0.75
+	
+	def compute_celeb_influence(self, current_followers):
+		L_i = gumbel_r.rvs(loc=0, scale=1.0)
+		k_ratio = current_followers / self.N
+		effective_quality = self.alpha * self.A_i + (1 - self.alpha) * max(0, L_i)
+		h_i = effective_quality * (k_ratio**self.gamma)
+		return h_i
+
+	def run(self, steps=1000, J=1.2, initial_temp=5.0, cooling_rate=0.97):
+		history = []
+		T = initial_temp
+
+		for step in range(steps):
+			m = np.mean(self.states)
+			followers = np.sum(self.states == 1)
+			h_i = self.compute_celeb_influence(followers)
+			eff_field = J * m + h_i + self.mu_bias
+			p_fanatic = 1.0 / (1.0 + np.exp(-2.0 * eff_field / T))
+			self.states = np.where(np.random.rand(self.N) < p_fanatic, 1, -1)
+			history.append(
+					{
+						"step": step,
+						"temperature_T": T,
+						"order_parameter_m": m,
+						"fanatic_ratio": followers / self.N,
+						"celeb_influence_h": h_i,
+					}
+			)
+			T *= cooling_rate
+		return pd.DataFrame(history)
+
+if __name__ == "__main__":
+	sim = CelebrityFanaticismSim(num_agents=10000)
+	df_result = sim.run(steps=1000, J=1.2, initial_temp=5.0)
+	df_result.to_parquet("fanaticism_simulation_log.parquet")
+	print("Simulation completed. Saved to 'fanaticism_simulation_log.parquet'.")
+	print(df_result.tail(10))
+</file>
+
+<file path="src/simulation/plot_phase_transition.py">
+import pandas as pd
+import matplotlib.pyplot as plt
+
+df = pd.read_parquet("fanaticism_simulation_log.parquet")
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+color_m = 'tab:red'
+ax1.set_xlabel('Step', fontsize=11)
+ax1.set_ylabel('Order Parameter (m)', color=color_m, fontsize=11)
+ax1.plot(df['step'], df['order_parameter_m'], color=color_m, linewidth=2.5, label='Order Parameter (m)')
+ax1.tick_params(axis='y', labelcolor=color_m)
+ax1.set_ylim(-1.1, 1.1)
+ax1_twin = ax1.twinx()
+color_t = 'tab:blue'
+ax1_twin.set_ylabel('Tempertature / Stress (T)', color=color_t, fontsize=11)
+ax1_twin.plot(df['step'], df['temperature_T'], color=color_t, linestyle='--', linewidth=1.5, label='Temperature (T)')
+ax1.set_title('Time Series: Jump to Fanaticism', fontsize=12, fontweight='bold')
+ax1.grid(True, alpha=0.3)
+
+ax2.plot(df['temperature_T'], df['order_parameter_m'], marker='o', markersize=4, color='purple', linestyle='-')
+ax2.invert_xaxis()
+ax2.set_xlabel('Social Stress / Temperature (T) [Decaying]', fontsize=11)
+ax2.set_ylabel('Order Parameter (m)', fontsize=11)
+ax2.set_title('Phase Diagram: Criticality Boundary', fontsize=12, fontweight='bold')
+ax2.set_ylim(-1.1, 1.1)
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig("phase_transition_plot.png", dpi=300)
+print("Graph saved successfully as 'phase_transition_plot.png'.")
+</file>
+
+<file path="src/simulation/requirements.txt">
+numpy
+pandas
+scipy
+pyarrow
+matplotlib
+</file>
+
+<file path="src/simulation-py/app/__init__.py">
+
+</file>
+
+<file path="src/simulation-py/app/agent.py">
+import asyncio
+import random
+import time
+import logging
+from app.models import TelemetryData
+from app.client import GatewayClient
+
+class Agent:
+	def __init__(self, agent_id: str, client: GatewayClient):
+		self.agent_id = agent_id
+		self.client = client
+		self.is_running = False
+	
+	async def run(self, interval_sec: float = 1.0):
+		self.is_running = True
+		logging.info(f"Agent [{self.agent_id}] started.")
+
+		while self.is_running:
+			telemetry = TelemetryData(
+					agent_id=self.agent_id,
+					timestamp=time.time(),
+					status="ACTIVE",
+					metrics={
+						"cpu_usage": round(random.uniform(10.0, 90.0), 2),
+						"memory_mb": random.randint(128, 1024),
+					}
+			)
+
+			await self.client.send_telemetry(telemetry.to_dict())
+			jitter = random.uniform(-0.1, 0.1)
+			await asyncio.sleep(max(0.1, interval_sec + jitter))
+
+	def stop(self):
+		self.is_running = False
+</file>
+
+<file path="src/simulation-py/app/client.py">
+import socket
+import json
+import logging
+
+class GatewayClient:
+	def __init__(self, host: str = "127.0.0.1", port: int = 8080):
+		self.host = host
+		self.port = port
+		self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+	async def send_telemetry(self, data: dict) -> bool:
+		try:
+			payload = json.dumps(data).encode('utf-8')
+			self.sock.sendto(payload, (self.host, self.port))
+			return True
+		except Exception as e:
+			logging.error(f"Failed to send UDP packet: {e}")
+			return False
+	
+	async def close(self):
+		self.sock.close()
+</file>
+
+<file path="src/simulation-py/app/models.py">
+import time
+from dataclasses import dataclass, asdict
+
+@dataclass
+class TelemetryData:
+	agent_id: str
+	timestamp: float
+	status: str
+	metrics: dict
+
+	def to_dict(self) -> dict:
+		return asdict(self)
+</file>
+
+<file path="src/simulation-py/requirement.txt">
+httpx?=0.27.0
+</file>
+
+<file path="src/solver-julia/Dockerfile">
+FROM julia:1.10
+
+WORKDIR /app
+
+RUN julia -e 'using Pkg; Pkg.add(["DifferentialEquations", "HTTP", "JSON3"])'
+
+COPY . .
+
+EXPOSE 8081
+
+CMD ["julia", "src/main.jl"]
+</file>
+
+<file path="src/stats-r/Dockerfile">
+FROM r-base:latest
+
+RUN apt-get update && apt-get install -y \
+		r-cran-plumber \
+		r-cran-mgcv \
+		r-cran-jsonlite \
+		&& rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+EXPOSE 8000
+
+CMD ["Rscript", "-e", "library(plumber); pr('src/main.R') |> pr_run(host='0.0.0.0', port=8000)"]
+</file>
+
+<file path="src/Structura.Tests/BufferTests.cs">
+using System;
+using Xunit;
+using Structura.Core.Buffers;
+using Structura.Core.Deconstruction;
+
+namespace Structura.Tests;
+
+public class BufferTests {
+	[Fact]
+	public void Pipeline_Shold_Be_Zero_Allocation() {
+		using var buffer = new AllocationFreeBuffer(1024);
+		ReadOnlySpan<byte> incomingChaos = stackalloc byte[] { 120, 150, 200, 180, 250 };
+		long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+
+		for (int i = 0; i < 100000; i++) {
+			buffer.Write(incomingChaos);
+			ReadOnlySpan<byte> readTrace = buffer.Read();
+
+			var evaluator = new DeconstructiveEvaluator(100.0, 0.5);
+			evaluator.Deconstruct(readTrace);
+
+			buffer.Clear();
+		}
+
+		long allocatedAfter = GC.GetAllocatedBytesForCurrentThread();
+		long totalAllocatedBytes = allocatedAfter - allocatedBefore;
+
+		Assert.Equal(0, totalAllocatedBytes);
+	}
+}
+</file>
+
+<file path="src/Structura.Tests/Structura.Tests.csproj">
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Structura.Core\Structura.Core.csproj" />
+  </ItemGroup>
+
+</Project>
+</file>
+
+<file path="src/Structura.Tests/UnitTest1.cs">
+namespace Structura.Tests;
+
+public class UnitTest1
+{
+    [Fact]
+    public void Test1()
+    {
+
+    }
+}
+</file>
+
+<file path="src/web-frontend/src/main.ts">
+const PACKET_SIZE = 24;
+const BUFFER_CAPACITY = 10000;
+const TOTAL_BUFFER_SIZE = 4 + (BUFFER_CAPACITY * PACKET_SIZE);
+
+async function init() {
+	console.log('[Main] Initializing Structura Zero-Copy Engine...');
+
+	if (typeof SharedArrayBuffer === 'undefined') {
+		alert('SharedArrayBuffer is not supported. Check Cross-Origin Isolation headers.');
+		return;
+	}
+
+	const sharedBuffer = new SharedArrayBuffer(TOTAL_BUFFER_SIZE);
+	const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+	worker.postMessage({ type: 'INIT', buffer: sharedBuffer });
+	const atomicIndex = new Int32Array(sharedBuffer, 0, 1);
+	let lastIndex = 0;
+
+	setInterval(() => {
+		const  currentIndex = Atomics.load(atomicIndex, 0);
+		const tps = currentIndex - lastIndex;
+		lastIndex = currentIndex;
+
+		const statusEl = document.getElementById('tps-counter');
+		if (statusEl) {
+			statusEl.innerText = `Current Ingestion Rate: ${tps.toLocaleString()} TPS (Total Received: ${currentIndex.toLocaleString()})`;
+		}
+	}, 1000);
+}
+
+window.addEventListener('DOMContentLoaded', init);
+</file>
+
+<file path="src/web-frontend/src/worker.ts">
+let sharedBuffer: SharedArrayBuffer;
+let uint8Array: Uint8Array;
+let atomicIndex: Int32Array;
+
+const PACKET_SIZE = 24;
+const BUFFER_CAPACITY = 10000;
+
+self.onmessage = (event: MessageEvent) => {
+	if (event.data.type === 'INIT') {
+		sharedBuffer = event.data.buffer;
+		atomicIndex = new Int32Array(sharedBuffer, 0, 1);
+		uint8Array = new Uint8Array(sharedBuffer, 4);
+
+		console.log('[Worker] SharedArrayBuffer initialized successfully.');
+		connectWebSocket();
+	}
+};
+
+function connectWebSocket() {
+	const ws = new WebSocket('ws://localhost:8080/ws/');
+	ws.binaryType = 'arraybuffer';
+	ws.onopen = () => {
+		console.log('[Worker] Connected to C# Binary WebSocket Stream!');
+	};
+
+	ws.onmessage = (event: MessageEvent) => {
+		if (event.data instanceof ArrayBuffer) {
+			const incomingBuffer = new Uint8Array(event.data);
+			const totalBytes = incomingBuffer.byteLength;
+
+			if (incomingBuffer.byteLength !== PACKET_SIZE) {
+				return;
+			}
+
+			const packetCount = Math.floor(totalBytes / PACKET_SIZE);
+
+			for (let i  = 0; i < packetCount; i++) {
+				const offset = i * PACKET_SIZE;
+				const packetData = incomingBuffer.subarray(offset, offset + PACKET_SIZE);
+				const currentIndex = Atomics.load(atomicIndex, 0);
+				const targetOffset = (currentIndex % BUFFER_CAPACITY) * PACKET_SIZE;
+				uint8Array.set(incomingBuffer, targetOffset);
+				Atomics.add(atomicIndex, 0, 1);
+			}
+		}
+	};
+
+	ws.onerror = (err) => console.error('[Worker] WS Error:', err);
+	ws.onclose = () => setTimeout(connectWebSocket, 1000);
+}
+</file>
+
+<file path="src/web-frontend/index.html">
+<!doctype html>
+<html lang="ja">
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<title>Structura - High Throughput Visualizer</title>
+		<link rel="icon" href="data:,">
+		<link rel="stylesheet" href="styles.css">
+	</head>
+	<body>
+		<h1>Structura // Feature 06 Visualizer</h1>
+		<div class="card">
+			<h2>Pipeline Status</h2>
+			<div id="tps-counter">Initializing SharedArrayBuffer...</div>
+		</div>
+		<script src="main.js"></script>
+	</body>
+</html>
+</file>
+
+<file path="src/web-frontend/main.ts">
+import '../styles.css';
+const PACKET_SIZE = 24;
+const BUFFER_CAPACITY = 10000;
+const TOTAL_BUFFER_SIZE = 4 + (BUFFER_CAPACITY * PACKET_SIZE);
+
+async function init() {
+	console.log('[Main] Initializing Structura Zero-Copy Engine...');
+
+	if (typeof SharedArrayBuffer === 'undefined') {
+		alert('SharedArrayBuffer is not supported. Check Cross-Origin Isolation headers.');
+		return;
+	}
+
+	const sharedBuffer = new SharedArrayBuffer(TOTAL_BUFFER_SIZE);
+	const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+	worker.postMessage({ type: 'INIT', buffer: sharedBuffer });
+	const atomicIndex = new Int32Array(sharedBuffer, 0, 1);
+	let lastIndex = 0;
+
+	setInterval(() => {
+		const  currentIndex = Atomics.load(atomicIndex, 0);
+		const tps = currentIndex - lastIndex;
+		lastIndex = currentIndex;
+
+		const statusEl = document.getElementById('tps-counter');
+		if (statusEl) {
+			statusEl.innerText = `Current Ingestion Rate: ${tps.toLocaleString()} TPS (Total Received: ${currentIndex.toLocaleString()})`;
+		}
+	}, 1000);
+}
+
+window.addEventListener('DOMContentLoaded', init);
+</file>
+
+<file path="src/web-frontend/package.json">
+{
+  "name": "web-frontend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+		"dev": "rspack dev",
+		"build": "rspack build"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@rspack/cli": "^2.1.5",
+    "@rspack/core": "^2.1.5",
+    "@rspack/dev-server": "^2.1.0",
+    "typescript": "^7.0.2"
+  }
+}
+</file>
+
+<file path="src/web-frontend/rspack.config.js">
+const path = require('path');
+const rspack = require('@rspack/core');
+
+/** @type {import('@rspack/cli').Configuration} */
+module.exports = {
+	entry: {
+		main: './src/main.ts',
+	},
+	output: {
+		path: path.resolve(__dirname, 'dist'),
+		filename: '[name].js',
+		publicPath: '/',
+	},
+	resolve: {
+		extensions: ['.ts', '.js'],
+	},
+	module: {
+		rules: [
+			{
+				test: /\.ts$/,
+				exclude: [/node_modules/],
+				loader: 'builtin:swc-loader',
+				options: {
+					jsc: {
+						parser: {
+							syntax: 'typescript',
+						},
+					},
+				},
+				type: 'javascript/auto',
+			},
+		],
+	},
+	plugins: [
+		new rspack.HtmlRspackPlugin({
+			template: './index.html',
+		}),
+	],
+	devServer: {
+		port: 3000,
+		hot: true,
+		headers: {
+			'Cross-Origin-Opener-Policy': 'same-origin',
+			'Cross-Origin-Embedder-Policy': 'require-corp',
+			'Content-Security-Policy': "default-src 'self'; connect-src 'self' ws://localhost:* http://localhost:*; worker-src 'self' blob:; style-src 'self' 'unsafe-inline';",
+		},
+	},
+};
+</file>
+
+<file path="src/web-frontend/styles.css">
+body {
+	background-color: #0f172a;
+	color: #f8fafc;
+	font-family: monospace;
+	padding: 20px;
+	margin: 0;
+}
+
+.card {
+	border: 1px solid #334155;
+	padding: 20px;
+	border-radius: 8px;
+	background-color: #1e293b;
+}
+
+#tps-counter {
+	font-size: 1.5rem;
+	color: #38bdf8;
+	font-weight: bold;
+}
+</file>
+
+<file path="src/web-frontend/tsconfig.json">
+{
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"lib": ["ESNext", "DOM", "WebWorker"],
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"noEmit": true,
+		"isolatedModules": true,
+		"resolveJsonModule": true,
+		"jsx": "preserve"
+	},
+	"include": ["src/**/*"]
+}
+</file>
+
+<file path="src/docker-compose.yml">
+version: '3.8'
+
+services:
+  stats-r:
+    build:
+      context: ./stats-r
+      dockerfile: Dockerfile
+    container_name: structura-stats-r
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./stats-r:/app
+    restart: unless-stopped
+
+  solver-julia:
+    build:
+      context: ./solver-julia
+      dockerfile: Dockerfile
+    container_name: structura-solver-julia
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./solver-julia:/app
+    restart: unless-stopped
+</file>
+
+<file path=".gitignore">
+## Ignore Visual Studio temporary files, build results, and
+## files generated by popular Visual Studio add-ons.
+##
+## Get latest from `dotnet new gitignore`
+
+# dotenv files
+.env
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# User-specific files (MonoDevelop/Xamarin Studio)
+*.userprefs
+
+# Mono auto generated files
+mono_crash.*
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio 2015/2017 cache/options directory
+.vs/
+# Uncomment if you have tasks that create the project's static files in wwwroot
+#wwwroot/
+
+# Visual Studio 2017 auto generated files
+Generated\ Files/
+
+# MSTest test Results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# NUnit
+*.VisualState.xml
+TestResult.xml
+nunit-*.xml
+
+# Build Results of an ATL Project
+[Dd]ebugPS/
+[Rr]eleasePS/
+dlldata.c
+
+# Benchmark Results
+BenchmarkDotNet.Artifacts/
+
+# .NET
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Tye
+.tye/
+
+# ASP.NET Scaffolding
+ScaffoldingReadMe.txt
+
+# StyleCop
+StyleCopReport.xml
+
+# Files built by Visual Studio
+*_i.c
+*_p.c
+*_h.h
+*.ilk
+*.meta
+*.obj
+*.iobj
+*.pch
+*.pdb
+*.ipdb
+*.pgc
+*.pgd
+*.rsp
+# but not Directory.Build.rsp, as it configures directory-level build defaults
+!Directory.Build.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*_wpftmp.csproj
+*.log
+*.tlog
+*.vspscc
+*.vssscc
+.builds
+*.pidb
+*.svclog
+*.scc
+
+# Chutzpah Test files
+_Chutzpah*
+
+# Visual C++ cache files
+ipch/
+*.aps
+*.ncb
+*.opendb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+
+# Visual Studio profiler
+*.psess
+*.vsp
+*.vspx
+*.sap
+
+# Visual Studio Trace Files
+*.e2e
+
+# TFS 2012 Local Workspace
+$tf/
+
+# Guidance Automation Toolkit
+*.gpState
+
+# ReSharper is a .NET coding add-in
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# TeamCity is a build add-in
+_TeamCity*
+
+# DotCover is a Code Coverage Tool
+*.dotCover
+
+# AxoCover is a Code Coverage Tool
+.axoCover/*
+!.axoCover/settings.json
+
+# Coverlet is a free, cross platform Code Coverage Tool
+coverage*.json
+coverage*.xml
+coverage*.info
+
+# Visual Studio code coverage results
+*.coverage
+*.coveragexml
+
+# NCrunch
+_NCrunch_*
+.*crunch*.local.xml
+nCrunchTemp_*
+
+# MightyMoose
+*.mm.*
+AutoTest.Net/
+
+# Web workbench (sass)
+.sass-cache/
+
+# Installshield output folder
+[Ee]xpress/
+
+# DocProject is a documentation generator add-in
+DocProject/buildhelp/
+DocProject/Help/*.HxT
+DocProject/Help/*.HxC
+DocProject/Help/*.hhc
+DocProject/Help/*.hhk
+DocProject/Help/*.hhp
+DocProject/Help/Html2
+DocProject/Help/html
+
+# Click-Once directory
+publish/
+
+# Publish Web Output
+*.[Pp]ublish.xml
+*.azurePubxml
+# Note: Comment the next line if you want to checkin your web deploy settings,
+# but database connection strings (with potential passwords) will be unencrypted
+*.pubxml
+*.publishproj
+
+# Microsoft Azure Web App publish settings. Comment the next line if you want to
+# checkin your Azure Web App publish settings, but sensitive information contained
+# in these scripts will be unencrypted
+PublishScripts/
+
+# NuGet Packages
+*.nupkg
+# NuGet Symbol Packages
+*.snupkg
+# The packages folder can be ignored because of Package Restore
+**/[Pp]ackages/*
+# except build/, which is used as an MSBuild target.
+!**/[Pp]ackages/build/
+# Uncomment if necessary however generally it will be regenerated when needed
+#!**/[Pp]ackages/repositories.config
+# NuGet v3's project.json files produces more ignorable files
+*.nuget.props
+*.nuget.targets
+
+# Microsoft Azure Build Output
+csx/
+*.build.csdef
+
+# Microsoft Azure Emulator
+ecf/
+rcf/
+
+# Windows Store app package directories and files
+AppPackages/
+BundleArtifacts/
+Package.StoreAssociation.xml
+_pkginfo.txt
+*.appx
+*.appxbundle
+*.appxupload
+
+# Visual Studio cache files
+# files ending in .cache can be ignored
+*.[Cc]ache
+# but keep track of directories ending in .cache
+!?*.[Cc]ache/
+
+# Others
+ClientBin/
+~$*
+*~
+*.dbmdl
+*.dbproj.schemaview
+*.jfm
+*.pfx
+*.publishsettings
+orleans.codegen.cs
+
+# Including strong name files can present a security risk
+# (https://github.com/github/gitignore/pull/2483#issue-259490424)
+#*.snk
+
+# Since there are multiple workflows, uncomment next line to ignore bower_components
+# (https://github.com/github/gitignore/pull/1529#issuecomment-104372622)
+#bower_components/
+
+# RIA/Silverlight projects
+Generated_Code/
+
+# Backup & report files from converting an old project file
+# to a newer Visual Studio version. Backup files are not needed,
+# because we have git ;-)
+_UpgradeReport_Files/
+Backup*/
+UpgradeLog*.XML
+UpgradeLog*.htm
+ServiceFabricBackup/
+*.rptproj.bak
+
+# SQL Server files
+*.mdf
+*.ldf
+*.ndf
+
+# Business Intelligence projects
+*.rdl.data
+*.bim.layout
+*.bim_*.settings
+*.rptproj.rsuser
+*- [Bb]ackup.rdl
+*- [Bb]ackup ([0-9]).rdl
+*- [Bb]ackup ([0-9][0-9]).rdl
+
+# Microsoft Fakes
+FakesAssemblies/
+
+# GhostDoc plugin setting file
+*.GhostDoc.xml
+
+# Node.js Tools for Visual Studio
+.ntvs_analysis.dat
+node_modules/
+
+# Visual Studio 6 build log
+*.plg
+
+# Visual Studio 6 workspace options file
+*.opt
+
+# Visual Studio 6 auto-generated workspace file (contains which files were open etc.)
+*.vbw
+
+# Visual Studio 6 auto-generated project file (contains which files were open etc.)
+*.vbp
+
+# Visual Studio 6 workspace and project file (working project files containing files to include in project)
+*.dsw
+*.dsp
+
+# Visual Studio 6 technical files
+*.ncb
+*.aps
+
+# Visual Studio LightSwitch build output
+**/*.HTMLClient/GeneratedArtifacts
+**/*.DesktopClient/GeneratedArtifacts
+**/*.DesktopClient/ModelManifest.xml
+**/*.Server/GeneratedArtifacts
+**/*.Server/ModelManifest.xml
+_Pvt_Extensions
+
+# Paket dependency manager
+.paket/paket.exe
+paket-files/
+
+# FAKE - F# Make
+.fake/
+
+# CodeRush personal settings
+.cr/personal
+
+# Python Tools for Visual Studio (PTVS)
+__pycache__/
+*.pyc
+
+# Cake - Uncomment if you are using it
+# tools/**
+# !tools/packages.config
+
+# Tabs Studio
+*.tss
+
+# Telerik's JustMock configuration file
+*.jmconfig
+
+# BizTalk build output
+*.btp.cs
+*.btm.cs
+*.odx.cs
+*.xsd.cs
+
+# OpenCover UI analysis results
+OpenCover/
+
+# Azure Stream Analytics local run output
+ASALocalRun/
+
+# MSBuild Binary and Structured Log
+*.binlog
+
+# NVidia Nsight GPU debugger configuration file
+*.nvuser
+
+# MFractors (Xamarin productivity tool) working folder
+.mfractor/
+
+# Local History for Visual Studio
+.localhistory/
+
+# Visual Studio History (VSHistory) files
+.vshistory/
+
+# BeatPulse healthcheck temp database
+healthchecksdb
+
+# Backup folder for Package Reference Convert tool in Visual Studio 2017
+MigrationBackup/
+
+# Ionide (cross platform F# VS Code tools) working folder
+.ionide/
+
+# Fody - auto-generated XML schema
+FodyWeavers.xsd
+
+# VS Code files for those working on multiple tools
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# Local History for Visual Studio Code
+.history/
+
+# Windows Installer files from build outputs
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# JetBrains Rider
+*.sln.iml
+.idea/
+
+##
+## Visual studio for Mac
+##
+
+
+# globs
+Makefile.in
+*.userprefs
+*.usertasks
+config.make
+config.status
+aclocal.m4
+install-sh
+autom4te.cache/
+*.tar.gz
+tarballs/
+test-results/
+
+# content below from: https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon must end with two \r
+Icon
+
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# content below from: https://github.com/github/gitignore/blob/main/Global/Windows.gitignore
+# Windows thumbnail cache files
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+
+# Dump file
+*.stackdump
+
+# Folder config file
+[Dd]esktop.ini
+
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# Windows Installer files
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# Windows shortcuts
+*.lnk
+
+# Vim temporary swap files
+*.swp
+
+# React
+node_modules/
+dist/
+
+# Python
+venv/
+__pycache__/
+</file>
+
+<file path=".github/PULL_REQUEST_TEMPLATE.md">
+# .github/PULL_REQUEST_TEMPLATE.md
+
+##  Summary
+<!-- Provide a high-level overview of the feature, refactoring, or fix introduced in this PR. -->
+
+
+##  Key Changes
+<!-- Bullet points highlighting the significant technical updates. -->
+- 
+
+##  How to Test
+<!-- Step-by-step instructions for testing or verifying the changes locally. -->
+```bash
+# Example commands to verify this PR
+```
+
+##  Verification Results / Logs
+<!-- Paste relevant command outputs, terminal logs, or metrics JSON to prove functionality. -->
+```json
+
+```
+
+##  Checklist
+- [ ] Code follows the style guidelines and architectural patterns of this project.
+- [ ] Self-review has been conducted before requesting review.
+- [ ] Unit tests or integration tests have been added/updated.
+- [ ] All tests pass locally (`go test ./...` or `docker compose`).
+
+
+---
+#  English Action Verbs for PR Titles & Commits
+
+| Verb | Usage | Example |
+|---|---|---|
+| **Add / Implement** | Adding new features or modules | `Implement AnalyticsClient for parallel execution` |
+| **Fix / Resolve** | Bug fixes, type errors, parse fixes | `Fix JSON3 deserialization type mismatch in Julia service` |
+| **Refactor** | Restructuring code without changing functionality | `Refactor HTTP request handling in gateway-go` |
+| **Optimize** | Performance or resource improvements | `Optimize parallel goroutine response aggregation` |
+| **Integrate** | Combining multiple services or libraries | `Integrate R and Julia microservices into Go gateway` |
+</file>
+
+<file path="src/backend-core/PacketProcessor.cs">
+using System;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+namespace Structura.Core;
+
+public static class PacketProcessor {
+	private const float CpuCriticalThreshold = 85.0f;
+	private const float MemoryCriticalThreshold = 90.0f;
+
+	private static long _packetCount = 0;
+	private static long _alertCount = 0;
+	private static readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+	private static long _lastReportTimeMs = 0;
+
+	public static WebBroadcaster Broadcaster { get; } = new();
+
+	public static void ProcessBuffer(ReadOnlySpan<byte> buffer) {
+		int packetSize = Marshal.SizeOf<TelemetryPacket>();
+
+		while (buffer.Length >= packetSize) {
+			ref readonly var packet = ref MemoryMarshal.AsRef<TelemetryPacket>(buffer[..packetSize]);
+
+			if (packet.IsValid) {
+				_packetCount++;
+
+				bool isCpuAlert = packet.CpuUsage >= CpuCriticalThreshold;
+				bool isMemAlert = packet.MemoryUsage >= MemoryCriticalThreshold;
+
+				if (isCpuAlert || isMemAlert) {
+					_alertCount++;
+				}
+
+				Broadcaster.BroadcastBuffer(buffer[..packetSize]);
+			}
+			buffer = buffer[packetSize..];
+		}
+
+		long currentMs = _stopwatch.ElapsedMilliseconds;
+		if (currentMs - _lastReportTimeMs >= 1000) {
+			double elapsedSeconds = (currentMs - _lastReportTimeMs) / 1000.0;
+			double tps = _packetCount / elapsedSeconds;
+
+			Console.WriteLine($"[PREF] Speed: {tps:N0} TPS (pkts/sec) | Alerts Detected: {_alertCount:N0} / {_packetCount:N0}");
+
+			_packetCount = 0;
+			_alertCount = 0;
+			_lastReportTimeMs = currentMs;
+		}
+	}
+}
+</file>
+
+<file path="src/gateway-go/client/analytics.go">
+package client
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+)
+
+type AnalyticsClient struct {
+	rBaseURL string
+	juliaBaseURL string
+	httpClient *http.Client
+}
+
+func NewAnalyticsClient(rBaseURL, juliaBaseURL string) *AnalyticsClient {
+	return &AnalyticsClient {
+		rBaseURL: rBaseURL,
+		juliaBaseURL: juliaBaseURL,
+		httpClient: &http.Client {
+			Timeout: 5 * time.Second,
+		},
+	}
+}
+
+type MetricPoint struct {
+	Time float64 `json:"time"`
+	Value float64 `json:"value"`
+}
+
+type RAnalyzeRawResponse struct {
+	Status []string `json:"status"`
+	IsPhaseTransition []bool `json:"is_phase_transition"`
+	Metrics struct {
+		Variance []float64 `json:"variance"`
+		Autocorrelation []float64 `json:"autocorrelation"`
+		Criticality []float64 `json:"criticality_socre"`
+	} `json:"metrics"`
+	Timestamp []string `json:"timestamp"`
+}
+
+type RAnalyzeResult struct {
+	Status string `json:"status"`
+	IsPhaseTransition bool `json:"is_phase_transition"`
+	Variance float64 `json:"variance"`
+	Autocorrelation float64 `json:"autocorrelation"`
+	CriticalityScore float64 `json:"criticality_score"`
+	Timestamp string `json:"timestamp"`
+}
+
+type JuliaSolveRequest struct {
+	InitialQueue float64 `json:"initial_queue"`
+	ArraivalRate float64 `json:"arrival_rate"`
+	ServiceRate float64 `json:"service_rate"`
+	Horizon float64 `json:"horizon"`
+}
+
+type JuliaSolveResponse struct {
+	Status string `json:"status"`
+	TimeSteps []float64 `json:"time_steps"`
+	PredictedQueue []float64 `json:"predicted_queue"`
+	terminalQueue float64 `json:"terminal_queue"`
+	OverflowRisk bool `json:"overflow_risk"`
+}
+
+type CombinedEvaluationResponse struct {
+	PhaseTransition RAnalyzeResult `json:"phase_transition"`
+	QueuePrediction JuliaSolveResponse `json:"queue_prediction"`
+	EvaluatedAt time.Time `json:"evaluated_at"`
+}
+
+func (c *AnalyticsClient) EvaluateAll(
+	ctx context.Context,
+	metrics []MetricPoint,
+	juliaReq JuliaSolveRequest,
+) (*CombinedEvaluationResponse, error) {
+	g, ctx :=errgroup.WithContext(ctx)
+
+	var rRaw RAnalyzeRawResponse
+	var juliaRes JuliaSolveResponse
+
+	g.Go(func() error {
+		bodyBytes, err := json.Marshal(metrics)
+		if err != nil {
+			return fmt.Errorf("R request marshal error: %w", err)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.rBaseURL+"/analyze", bytes.NewBuffer(bodyBytes))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err  != nil {
+			return fmt.Errorf("R service error: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("R service retrun status %d", resp.StatusCode)
+		}
+
+		return json.NewDecoder(resp.Body).Decode(&rRaw)
+	})
+
+	g.Go(func() error {
+		bodyBytes, err := json.Marshal(juliaReq)
+		if err != nil {
+			return fmt.Errorf("Julia request marshal error: %w", err)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.juliaBaseURL+"/solve", bytes.NewBuffer(bodyBytes))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Context-Type", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("Julia service error: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("Julia service  returned  status %d", resp.StatusCode)
+		}
+
+		return json.NewDecoder(resp.Body).Decode(&juliaRes)
+	})
+
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	rResult := RAnalyzeResult {
+		Status: getFirst(rRaw.Status, "UNKNOWN"),
+		IsPhaseTransition: getFirst(rRaw.IsPhaseTransition, false),
+		Variance: getFirst(rRaw.Metrics.Variance, 0.0),
+		Autocorrelation: getFirst(rRaw.Metrics.Autocorrelation, 0.0),
+		CriticalityScore: getFirst(rRaw.Metrics.Criticality, 0.0),
+		Timestamp: getFirst(rRaw.Timestamp, ""),
+	}
+
+	return &CombinedEvaluationResponse {
+		PhaseTransition: rResult,
+		QueuePrediction: juliaRes,
+		EvaluatedAt: time.Now().UTC(),
+	}, nil
+}
+
+func getFirst[T any](slice []T, fallback T) T {
+	if len(slice) > 0 {
+		return slice[0]
+	}
+	return fallback
+}
+</file>
+
+<file path="src/gateway-go/internal/listener/ipfix/ipfix_listener.go">
+package ipfix
+
+import (
+	"context"
+	"log"
+	"net"
+
+	"gateway-go/internal/listener"
+)
+
+type IPFIXListener struct {
+	conn *net.UDPConn
+}
+
+func NewIPFIXListener() *IPFIXListener {
+	return &IPFIXListener{}
+}
+
+func (l *IPFIXListener) Name() string {
+	return "IPFIX-NetFlow-Listener"
+}
+
+func (l *IPFIXListener) Start(ctx context.Context, dataCh chan<- listener.TelemetryData) error {
+	addr := net.UDPAddr {
+		Port: 2055,
+		IP: net.ParseIP("0.0.0.0"),
+	}
+
+	conn, err := net.ListenUDP("udp", &addr)
+	if err != nil {
+		return err
+	}
+	l.conn = conn
+
+	log.Printf("[%s] UDP socket listening on 0.0.0.0:2055 for IPFIX/NerFlow packets...", l.Name())
+
+	go func() {
+		defer conn.Close()
+
+		go func() {
+			<-ctx.Done()
+			conn.Close()
+		}()
+
+		buf := make([]byte, 2048)
+		for {
+			n, srcAddr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					log.Printf("[%s] Stopping IPFIX Listener...", l.Name())
+					return
+				default:
+					log.Printf("[%s] UDP Read error: %v", l.Name(), err)
+					continue
+				}
+			}
+
+			dataCh <- listener.TelemetryData {
+				Timestamp: 0,
+				Source: "ipfix",
+				Metric: "netflow_packet_bytes",
+				Value: float64(n),
+				Tags: map[string]string {
+					"exporter_ip": srcAddr.IP.String(),
+				},
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (l *IPFIXListener) Stop() error {
+	if l.conn != nil {
+		_ = l.conn.Close()
+	}
+
+	return nil
+}
+</file>
+
+<file path="src/simulation-py/main.py">
+import asyncio
+import random
+import socket
+import struct
+import time
+
+GATEWAY_ADDR = ("127.0.0.1", 8080)
+MAGIC = 0x53545255
+
+def create_telemetry_packet(agent_id: int) -> bytes:
+	timestamp_ms = int(time.time() * 1000)
+	cpu_usage = (
+			random.uniform(86.0, 98.0)
+			if random.random() < 0.2
+			else random.uniform(20.0, 70.0)
+	)
+	mem_usage = (
+			random.uniform(91.0, 99.0)
+			if random.random() < 0.1
+			else random.uniform(30.0, 60.0)
+	)
+
+	return struct.pack(
+			"<IIqff", MAGIC, agent_id, timestamp_ms, cpu_usage, mem_usage
+	)
+
+async def run_simulator():
+	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+	print(
+			f"[Python Simulator] Sending binary packets to Go Gateway ({GATEWAY_ADDR[0]}:{GATEWAY_ADDR[1]})..."
+	)
+
+	agent_id = 101
+	packet_count = 0
+
+	try:
+		while True:
+			packet = create_telemetry_packet(agent_id)
+			sock.sendto(packet, GATEWAY_ADDR)
+
+			packet_count += 1
+			if packet_count % 100 == 0:
+				print (
+						f"[Python Simulator] Sent {packet_count} binary packets."
+				)
+
+			await asyncio.sleep(0)
+	finally:
+		sock.close()
+
+if __name__ == "__main__":
+	asyncio.run(run_simulator())
+</file>
+
+<file path="src/backend-core/Program.cs">
+using System;
+using System.IO;
+using System.Net.Sockets;
+using System.Threading.Tasks;
+
+namespace Structura.Core;
+
+internal class Program {
+	private const string SocketPath = "/tmp/structura.sock";
+
+	static async Task Main(string[] args) {
+		await PacketProcessor.Broadcaster.StartAsync(8080);
+		if (File.Exists(SocketPath)) {
+			File.Delete(SocketPath);
+		}
+
+		Console.WriteLine("=== Structura Backend Core (.NET 10) ===");
+		using var listenSocket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+		listenSocket.Bind(new UnixDomainSocketEndPoint(SocketPath));
+		listenSocket.Listen(10);
+
+		Console.WriteLine($"[C# Core] Waiting for Go Gateway connection on {SocketPath}...");
+
+		using var clientSocket = await listenSocket.AcceptAsync();
+		Console.WriteLine("[C# Core] Gateway connected. Zero-Alloc evaluation loop running...");
+
+		var buffer = new byte[1024];
+
+		while (true) {
+			int readBytes = await clientSocket.ReceiveAsync(buffer, SocketFlags.None);
+			if (readBytes == 0) {
+				break;
+			}
+			PacketProcessor.ProcessBuffer(buffer.AsSpan(0, readBytes));
+		}
+	}
+}
+</file>
+
+<file path="src/gateway-go/go.mod">
+module gateway-go
+
+go 1.26.4
+
+require (
+	github.com/cilium/ebpf v0.22.0
+	golang.org/x/sync v0.22.0
+)
+
+require golang.org/x/sys v0.43.0 // indirect
+</file>
+
+<file path="src/solver-julia/src/main.jl">
+using DifferentialEquations
+using HTTP
+using JSON3
+
+function queue_dynamics!(dq, q, p, t)
+	lambda, mu = p
+	dq[1] = lambda - mu * tanh(max(0.0, q[1]))
+end
+
+function handle_solve(req::HTTP.Request)
+	try
+		body_str = String(req.body)
+		if isempty(body_str)
+			return HTTP.Respose(400, ["Content-Type" => "application/json"], JSON3.write(Dict("error" => "Empty request body")))
+		end
+
+		body = JSON3.read(body_str)
+
+		q0 = Float64(get(body, :initial_queue, 10.0))
+		lambda = Float64(get(body, :arrival_rate, 120.0))
+		mu = Float64(get(body, :service_rate, 100.0))
+		t_max = Float64(get(body, :horizon, 5.0))
+
+		u0 = [q0]
+		p = (lambda, mu)
+		tspan = (0.0, t_max)
+
+		prob = ODEProblem(queue_dynamics!, u0, tspan, p)
+		sol = solve(prob, Tsit5(), reltol=1e-6, abstol=1e-6)
+
+		times = collect(range(0.0, t_max, length=20))
+		predicted_queue = [sol(t)[1] for t in times]
+
+		response_payload = Dict(
+			"status" => "SUCCESS",
+			"time_steps" => times,
+			"predicted_queue" => predicted_queue,
+			"terminal_queue" => predicted_queue[end],
+			"overflow_risk" => predicted_queue[end] > 90.0
+		)
+
+		return HTTP.Response(200, ["Content-Type" => "application/json"], JSON3.write(response_payload))
+	catch e
+		return HTTP.Response(400, ["Content-Type" => "application/json"], JSON3.write(Dict("error" => string(e))))
+	end
+end
+
+function router(req::HTTP.Request)
+	if req.target == "/solve" && req.method == "POST"
+		return handle_solve(req)
+	else
+		return HTTP.Response(404, "Not Found")
+	end
+end
+
+println("Julia Solver API listening on http://0.0.0.0:8081 ...")
+HTTP.serve(router, "0.0.0.0", 8081)
+
+main()
+</file>
+
+<file path="src/stats-r/src/main.R">
+library(plumber)
+library(mgcv)
+library(jsonlite)
+
+#* @post /analyze
+#* @serializer json
+function(req) {
+	raw_body <- req$postBody
+	input_data <- fromJSON(raw_body)
+	df <- as.data.frame(input_data)
+
+	if (nrow(df) < 10) {
+		return(list(
+			status = "INSUFFICIENT_DATA",
+			criticality_score = 0.0,
+			is_phase_transition = FALSE,
+			message = "At least 10 data points are required for GAM fitting."
+		))
+	}
+
+	gam_fit <- gam(value ~ s(time, bs = "cr"), data = df)
+	residual_val <- residuals(gam_fit)
+
+	current_variance <- var(residual_val)
+	acf_res <- acf(residual_val, plot = FALSE, lag.max = 1)
+	autocorr_lag1 <- ifelse(length(acf_res$acf) > 1, acf_res$acf[2], 0)
+
+	criticality_score <- current_variance * (1 + max(0, autocorr_lag1))
+	is_transition <- (autocorr_lag1 > 0.7) && (current_variance > 1.5)
+
+	return(list(
+		status = "SUCCESS",
+		metrics = list(
+			variance = current_variance,
+			autocorrelation = autocorr_lag1,
+			criticality_score = criticality_score
+		),
+		is_phase_transition = as.logical(is_transition),
+		timestamp = Sys.time()
+	))
+}
+</file>
+
+<file path="README.md">
+# Structura & Go Telemetry Gateway
+
+> **Ultra-Low Latency, Multi-Protocol Telemetry Processing Pipeline & Real-Time Analytics Engine**
+
+An enterprise-grade Observability architecture capable of ingesting kernel-level events, gRPC telemetry streams, and flow records at **150,000+ TPS (Transactions Per Second)** with sub-millisecond processing overhead.
+
+---
+
+## Key Highlights & Performance
+
+- **⚡ Extreme Throughput**: Engineered for **150,000+ TPS** with zero-copy memory pipelines and lock-free concurrency patterns.
+- **🐧 eBPF Kernel Tracing**: Directly hooks into the Linux kernel using `cilium/ebpf` to trace socket events (`tcp_v4_connect`) via high-speed RingBuffers.
+- **🌐 Multi-Protocol Ingestion**: Unifies heterogeneous data sources (**eBPF**, **gNMI/gRPC**, and **IPFIX/NetFlow UDP**) into a synchronized Go processing pipeline.
+- **🔄 Graceful Concurrency**: Built with context-aware goroutine lifecycles ensuring zero memory leaks and clean shutdown sequences.
+
+---
+
+## 🏗️ Architecture & Data Flow
+
+```text
+  [ Linux Kernel Space ]         [ Network Routers ]        [ Flow Exporters ]
+   eBPF / kprobes                 gNMI (gRPC)                IPFIX / NetFlow
+  (tcp_v4_connect)               (OpenConfig)                  (UDP 2055)
+         │                            │                            │
+         └────────────────────────────┼────────────────────────────┘
+                                      │
+                                      ▼
+             ┌─────────────────────────────────────────────────┐
+             │            Go Telemetry Gateway                 │
+             │   - Async Concurrent Listeners                  │
+             │   - Thread-safe Channel Multiplexing            │
+             │   - Graceful Context Lifecycle                  │
+             └────────────────────────┬────────────────────────┘
+                                      │  (IPC / Ultra-High Speed Stream)
+                                      ▼
+             ┌─────────────────────────────────────────────────┐
+             │       C# Structura Processing Engine            │
+             │   - High-Throughput Memory Pipeline (150k+ TPS) │
+             │   - Non-linear Phase Transition Analysis (R)    │
+             └─────────────────────────────────────────────────┘
+```
+
+---
+
+## 🛠️ Multi-Protocol Telemetry Modules
+
+| Protocol | Layer | Mechanism | Primary Target / Metric |
+|---|---|---|---|
+| **eBPF** | Kernel Space | `cilium/ebpf` + Linux RingBuffer | Real-time process socket connections (`comm`, `pid`, `tcp_connect`) |
+| **gNMI** | Application | gRPC Streaming (YANG / OpenConfig) | Device interface counters, CPU/Memory telemetry |
+| **IPFIX** | Transport | UDP Socket (Port 2055) | Flow records, packet/byte counts across exporters |
+
+---
+
+## 📊 Performance Benchmarks
+
+- **Peak Ingestion Rate**: `> 150,000 TPS`
+- **Kernel-to-User Transfer Latency**: `< 1μs` (via eBPF RingBuffer)
+- **Pipeline Processing Model**: Non-blocking asynchronous event loops
+- **Resource Footprint**: Minimal CPU overhead with zero-copy memory patterns
+
+---
+
+## 🧰 Getting Started (Go Gateway)
+
+### Prerequisites (Arch Linux)
+
+```bash
+sudo pacman -S clang llvm libbpf linux-headers
+```
+
+### Build & Run
+
+```bash
+# 1. Generate eBPF Go bindings
+go generate ./internal/listener/ebpf/...
+
+# 2. Execute Gateway with eBPF privileges
+sudo go run cmd/main.go
+```
+</file>
+
+<file path="src/gateway-go/main.go">
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"gateway-go/client"
+	"gateway-go/handler"
+)
+
+func main() {
+	port := getEnv("PORT", "8080")
+	rURL := getEnv("R_SERVICE_URL", "http://localhost:8000")
+	juliaURL := getEnv("JULIA_SERVICE_URL", "http://localhost:8081")
+
+	log.Printf("[INFO] Starting Gateway Service...")
+	log.Printf("[INFO] Target R Service (stats-r) : %s", rURL)
+	log.Printf("[INFO] Target Julia Service (solver-julia): %s", juliaURL)
+
+	analyticsClient := client.NewAnalyticsClient(rURL, juliaURL)
+	analyticsHandler := handler.NewAnalyticsHandler(analyticsClient)
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status:":"UP"}`))
+	})
+
+	mux.HandleFunc("/api/v1/analytics/eval", analyticsHandler.HandleEvaluate)
+
+	server := &http.Server {
+		Addr: ":" + port,
+		Handler: mux,
+		ReadTimeout: 10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout: 15 * time.Second,
+	}
+
+	go func() {
+		log.Printf("[INFO] Gateway HTTP Listener on http://0.0.0.0:%s", port)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("[FATAL] Server startup failed: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Printf("[INFO] Shutting down Gateway server gracefully...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("[ERROR] Server forced shutdown: %v", err)
+	}
+
+	log.Printf("[INFO] Gateway server stopped successfully.")
+}
+
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists && value != "" {
+		return value
+	}
+	return fallback
+}
+</file>
+
+<file path=".github/workflows/ci.yml">
+name: Gateway CI
+
+on:
+  push:
+    branches: [ main, "feature/**" ]
+  pull_request:
+    branches: [ main ]
+
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install dependencis
+        run: |
+          cd src/gateway-go
+          go mod download
+
+#      - name: Run Linter
+#        uses: golangci/golangci-lint-action@v4
+#        with:
+#          version: v1.60.0
+#          working-directory: gateway-go
+
+      - name: Run Unit Tests with Coverage
+        run: |
+          cd src/gateway-go
+          go test -v -coverprofile=coverage.out ./...
+</file>
+
+</files>
