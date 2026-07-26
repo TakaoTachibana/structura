@@ -19,6 +19,11 @@ public static class PacketProcessor {
 	public static void ProcessBuffer(ReadOnlySpan<byte> buffer) {
 		int packetSize = Marshal.SizeOf<TelemetryPacket>();
 
+		Span<byte> cpuMetircsBuffer = stackalloc byte[Math.Min(buffer.Length / packetSize, 256)];
+		int metricCount = 0;
+
+		ReadOnlySpan<byte> currentSpan = buffer;
+
 		while (buffer.Length >= packetSize) {
 			ref readonly var packet = ref MemoryMarshal.AsRef<TelemetryPacket>(buffer[..packetSize]);
 
@@ -32,9 +37,20 @@ public static class PacketProcessor {
 					_alertCount++;
 				}
 
+				if (metricCount < cpuMetricsBuffer.Length) {
+					cpuMetricsBuffer[metricCount++] = (byte)Math.Clamp(packet.CpuUsage, 0f, 255f);
+				}
+
 				Broadcaster.BroadcastBuffer(buffer[..packetSize]);
 			}
 			buffer = buffer[packetSize..];
+		}
+
+		if (metricCount > 1) {
+			var evaluator = new StreamCriticalityEvaluator(varianceThreshold: 50.0, autocorrThreshold: 0.6);
+			if (evaluator.Evaluate(cpuMetricBuffer[..metricCount], out double variance, out double autocorr)) {
+				_criticalityAlertCount++;
+			}
 		}
 
 		long currentMs = _stopwatch.ElapsedMilliseconds;
