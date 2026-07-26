@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Structura.Core\Structura.Core.csproj" />
+    <ProjectReference Include="..\backend-core\Structura.Core\Structura.Core.csproj" />
   </ItemGroup>
 
 </Project>
