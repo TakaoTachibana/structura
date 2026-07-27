@@ -1,0 +1,4 @@
+[deps]
+DifferentialEquations = "0c46a032-eb83-5123-abaf-570d42b7f19d"
+HTTP = "cd3e117c-1570-5b70-9990-4498d086afd5"
+JSON3 = "0f5d064f-620d-457d-b84d-a60216868626"
