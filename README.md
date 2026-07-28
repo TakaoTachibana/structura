@@ -1,80 +1,122 @@
-# Structura & Go Telemetry Gateway
+# Structura // Unified Telemetry & Social Dynamics Criticality Engine
 
-> **Ultra-Low Latency, Multi-Protocol Telemetry Processing Pipeline & Real-Time Analytics Engine**
+> **Ultra-Low Latency, Multi-Domain Observability & Critical Slowing Down Analysis System**
 
-An enterprise-grade Observability architecture capable of ingesting kernel-level events, gRPC telemetry streams, and flow records at **150,000+ TPS (Transactions Per Second)** with sub-millisecond processing overhead.
-
----
-
-## Key Highlights & Performance
-
-- **⚡ Extreme Throughput**: Engineered for **150,000+ TPS** with zero-copy memory pipelines and lock-free concurrency patterns.
-- **🐧 eBPF Kernel Tracing**: Directly hooks into the Linux kernel using `cilium/ebpf` to trace socket events (`tcp_v4_connect`) via high-speed RingBuffers.
-- **🌐 Multi-Protocol Ingestion**: Unifies heterogeneous data sources (**eBPF**, **gNMI/gRPC**, and **IPFIX/NetFlow UDP**) into a synchronized Go processing pipeline.
-- **🔄 Graceful Concurrency**: Built with context-aware goroutine lifecycles ensuring zero memory leaks and clean shutdown sequences.
+**Structura** is a hybrid analytics engine designed to unify kernel-level system/network telemetry with social sentiment time-series streams. Built for extreme performance, it ingests data at **150,000+ TPS (Transactions Per Second)** with sub-millisecond processing overhead (utilizing zero-allocation, zero-copy memory patterns) while detecting phase transitions and Critical Slowing Down (CSD) in real time.
 
 ---
 
-## 🏗️ Architecture & Data Flow
+## 💡 Key Concept: System & Social Criticality
 
-```text
-  [ Linux Kernel Space ]         [ Network Routers ]        [ Flow Exporters ]
-   eBPF / kprobes                 gNMI (gRPC)                IPFIX / NetFlow
-  (tcp_v4_connect)               (OpenConfig)                  (UDP 2055)
-         │                            │                            │
-         └────────────────────────────┼────────────────────────────┘
-                                      │
-                                      ▼
-             ┌─────────────────────────────────────────────────┐
-             │            Go Telemetry Gateway                 │
-             │   - Async Concurrent Listeners                  │
-             │   - Thread-safe Channel Multiplexing            │
-             │   - Graceful Context Lifecycle                  │
-             └────────────────────────┬────────────────────────┘
-                                      │  (IPC / Ultra-High Speed Stream)
-                                      ▼
-             ┌─────────────────────────────────────────────────┐
-             │       C# Structura Processing Engine            │
-             │   - High-Throughput Memory Pipeline (150k+ TPS) │
-             │   - Non-linear Phase Transition Analysis (R)    │
-             └─────────────────────────────────────────────────┘
-```
+Structura operates on a foundational premise in statistical physics: **system failures (e.g., resource congestion, queue overflows)** and **social phase transitions (e.g., sudden shifts in collective opinion or topic boiling)** share identical non-linear dynamical traits described by Ginzburg-Landau-type bifurcations and stochastic differential equations.
+
+1. **System Telemetry Domain**: Ingests CPU/Memory utilization, active TCP connection states, and network flow metrics via eBPF, gNMI, and IPFIX.
+2. **Social Sentiment Domain**: Ingests aggregate collective sentiment indices ($m$) and post-volume dynamics sourced from platform streams or chat logs.
+
+By running high-throughput baseline evaluations (variance fluctuations and autocorrelation shifts) in C# (.NET 10), Structura dispatches asynchronous analytical payloads to microservices running **Julia (SDE Solver)** and **R (GAM Fitting & Causal Discovery)** as soon as CSD precursor thresholds are breached.
 
 ---
 
-## 🛠️ Multi-Protocol Telemetry Modules
+## 🏗️ Multi-Tier Architecture & Data Flow
 
-| Protocol | Layer | Mechanism | Primary Target / Metric |
-|---|---|---|---|
-| **eBPF** | Kernel Space | `cilium/ebpf` + Linux RingBuffer | Real-time process socket connections (`comm`, `pid`, `tcp_connect`) |
-| **gNMI** | Application | gRPC Streaming (YANG / OpenConfig) | Device interface counters, CPU/Memory telemetry |
-| **IPFIX** | Transport | UDP Socket (Port 2055) | Flow records, packet/byte counts across exporters |
+  [ Kernel & Network Domain ]         [ Social Dynamics Stream ]
+   eBPF / gNMI / NetFlow               Sentiment (m) / Volume
+            │                                    │
+            └─────────────────┬──────────────────┘
+                              │ (UDP Stream / Zero-Alloc Sockets)
+                              ▼
+               ┌──────────────────────────────┐
+               │  Go Telemetry Gateway        │
+               │  - Async Multi-Protocol Recv │
+               │  - Parallel Orchestration    │
+               └──────────────┬───────────────┘
+                              │ (Unix Domain Socket / Memory Stream)
+                              ▼
+               ┌──────────────────────────────┐
+               │ C# Core Engine (.NET 10)     │
+               │ - AllocationFreeBuffer       │
+               │ - Streaming Criticality Eval │
+               └──────────────┬───────────────┘
+                              │ (HTTP Parallel Dispatch)
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+  ┌──────────────────────┐        ┌──────────────────────┐
+  │ Julia SDE Engine     │        │ R Causal & GAM Engine│
+  │ - Tipping Solver     │        │ - Causal Discovery   │
+  │ - Monte Carlo SRA1   │        │ - GAM Criticality    │
+  └──────────────────────┘        └──────────────────────┘
 
 ---
 
-## 📊 Performance Benchmarks
+## 🛠️ Module Overview
 
-- **Peak Ingestion Rate**: `> 150,000 TPS`
-- **Kernel-to-User Transfer Latency**: `< 1μs` (via eBPF RingBuffer)
-- **Pipeline Processing Model**: Non-blocking asynchronous event loops
-- **Resource Footprint**: Minimal CPU overhead with zero-copy memory patterns
+### 1. Ingestion Layer (`gateway-go` & `simulation-py`)
+- **eBPF Kernel Tracer**: Uses `cilium/ebpf` to hook into kernel-space socket operations (`tcp_v4_connect`) via high-speed Linux RingBuffers with sub-microsecond latency.
+- **Multi-Protocol Listener**: Concurrent ingestion of gNMI (gRPC / OpenConfig) and IPFIX (NetFlow records over UDP port 2055).
+- **Social Dynamics Simulator**: Python-based generator modeling social sentiment dynamics using mean-field Ising approximations and extreme value distribution influences.
+
+### 2. High-Throughput Processing Engine (`backend-core`)
+- **.NET 10 / C# Zero-Allocation Pipeline**: Employs `ArrayPool<T>`, `ReadOnlySpan<T>`, and `stackalloc` constructs to eliminate GC pressure at sustained throughputs of 150,000+ TPS.
+- **Streaming Criticality Evaluator**: Calculates variance $\sigma^2$ and lag-1 autocorrelation $AR(1)$ over sliding buffers in real time to capture Critical Slowing Down precursors.
+
+### 3. Parallel Analytical Microservices (`solver-julia` & `stats-r`)
+- **Julia Tipping Solver**: Monte Carlo SDE (Stochastic Differential Equation) solver estimating bifurcation probabilities (tipping risk) using parallel ensemble threads (`EnsembleThreads` / `SRA1` adaptive solver).
+- **R Statistical & Causal Discovery Engine**: Fits Generalized Additive Models (GAM) to pinpoint non-linear inflection points ($T_c$) and performs constraint-based causal structure learning using the PC algorithm.
+
+### 4. Zero-Copy Visualizer (`web-frontend`)
+- **Rspack & SharedArrayBuffer**: Executes zero-copy memory transfers between UI workers and main threads via `SharedArrayBuffer` and `Atomics` to prevent main-thread freezing under intense TPS loads.
 
 ---
 
-## 🧰 Getting Started (Go Gateway)
+## 📊 Dual Analytics Domain Matrix
 
-### Prerequisites (Arch Linux)
+| Metric / Dimension | System Telemetry Domain | Social Sentiment Domain |
+|---|---|---|
+| **Input Signals** | CPU/Mem Usage, TCP Connect, Flow Bytes | Sentiment Index ($m \in [-1, 1]$), Post Volume |
+| **Mathematical Basis** | Queuing Bifurcation / Resource Saturation | Mean-Field Ising Model / External Field Dynamics |
+| **Critical Event** | Queue Overflow / Cascading System Outage | Fanaticism Jump / Topic Boiling (Phase Transition) |
+| **Analytical Pipeline** | Julia ODE/SDE Solver (Queue Dynamics) | R (GAM inflection point $T_c$ / PC Causality) |
 
-```bash
-sudo pacman -S clang llvm libbpf linux-headers
-```
+---
 
-### Build & Run
+## 🧰 Quick Start
 
-```bash
-# 1. Generate eBPF Go bindings
-go generate ./internal/listener/ebpf/...
+### Prerequisites
+- Docker & Docker Compose
+- Go 1.22+ (for Gateway local development)
+- .NET 10 SDK (for C# Core local development)
+- Linux Kernel 5.4+ (for running eBPF features)
 
-# 2. Execute Gateway with eBPF privileges
-sudo go run cmd/main.go
-```
+### 1. Launch Microservices via Docker Compose
+
+Build and launch the complete stack (Go Gateway, Julia Solver, and R Analytics Engine):
+
+    git clone https://github.com/your-org/structura.git
+    cd structura/src
+    docker compose up --build
+
+### 2. Execute Data Stream Simulators
+
+In a separate terminal, install dependencies and launch the simulators to generate telemetry and social sentiment traffic:
+
+    cd src/simulation-py
+    pip install -r requirement.txt
+
+    # Stream social sentiment dynamics
+    python social_stream_sim.py
+
+    # Stream binary system telemetry packets
+    python main.py
+
+### 3. Run Benchmark Tests
+
+Verify the zero-allocation performance invariants in the C# core processing engine:
+
+    cd src/Structura.Tests
+    dotnet test
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

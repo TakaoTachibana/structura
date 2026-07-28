@@ -147,6 +147,394 @@ README.md
 <files>
 This section contains the contents of the repository's files.
 
+<file path="src/backend-core/Ipc/UnixDomainSocketListener.cs">
+using System;
+using System.Buffers;
+using System.IO;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
+using Structura.Core.Buffers;
+
+namespace Structura.Core.Ipc;
+
+public sealed class UnixDomainSocketListener {
+	private readonly string _socketPath;
+	private readonly AllocationFreeBuffer _buffer;
+	private Socket? _listenerSocket;
+
+	public UnixDomainSocketListener(string socketPath, AllocationFreeBuffer buffer) {
+		_socketPath = socketPath;
+		_buffer = buffer;
+	}
+
+	public async Task StartAsync(CancellationToken cancellationToken) {
+		if (File.Exists(_socketPath)) {
+			File.Delete(_socketPath);
+		}
+
+		var endPoint = new UnixDomainSocketEndPoint(_socketPath);
+		_listenerSocket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+
+		_listenerSocket.Bind(endPoint);
+		_listenerSocket.Listen(128);
+
+		Console.WriteLine($"[C# Core] IPC Listener started on {_socketPath}");
+
+		try {
+			while (!cancellationToken.IsCancellationRequested) {
+				Socket clientSocket = await _listenerSocket.AcceptAsync(cancellationToken);
+				_ = HandleClientAsync(clientSocket, cancellationToken);
+			}
+		} catch (OperationCanceledException) {
+		} finally {
+			Cleanup();
+		}
+	}
+
+	private async Task HandleClientAsync(Socket clientSocket, CancellationToken cancellationToken) {
+		using (clientSocket) {
+			byte[] receiveBuffer = ArrayPool<byte>.Shared.Rent(65535);
+			try {
+				while (!cancellationToken.IsCancellationRequested) {
+					int bytesRead = await clientSocket.ReceiveAsync(
+							receiveBuffer.AsMemory(),
+							SocketFlags.None,
+							cancellationToken
+					);
+					
+					if (bytesRead == 0) {
+						break;
+					}
+
+					_buffer.Write(receiveBuffer.AsSpan(0, bytesRead));
+					Console.WriteLine($"[C# Core] IPC Received: {bytesRead} byte from Go Gateway");
+				}
+			} catch (Exception ex) when (ex is not OperationCanceledException) {
+				Console.WriteLine($"[C# Core] IPC Connection error: {ex.Message}");
+			} finally {
+				ArrayPool<byte>.Shared.Return(receiveBuffer);
+			}
+		}
+	}
+
+	private void Cleanup() {
+		_listenerSocket?.Close();
+		if (File.Exists(_socketPath)) {
+			File.Delete(_socketPath);
+		}
+		Console.WriteLine("[C# Core] IPC Listener stopped & socket cleaned up.");
+	}
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Buffers/AllocationFreeBuffer.cs">
+using System;
+using System.Buffers;
+
+namespace Structura.Core.Buffers;
+
+public sealed class AllocationFreeBuffer : ITraceBuffer {
+	private readonly int _capacity;
+	private byte[]? _rentedArray;
+	private int _writePosition;
+	private int _readPosition;
+	private int _count;
+
+	public AllocationFreeBuffer(int capacity) {
+		_capacity = capacity;
+		_rentedArray = ArrayPool<byte>.Shared.Rent(capacity);
+	}
+
+	public void Write(ReadOnlySpan<byte> data) {
+		ObjectDisposedException.ThrowIf(_rentedArray is null, this);
+
+		if (data.Length > _capacity) {
+			throw new ArgumentOutOfRangeException(nameof(data), "datasize exceeded.");
+		}
+
+		int availableSpace = _capacity - _count;
+		if (data.Length > availableSpace) {
+			_readPosition = (_readPosition + (data.Length - availableSpace)) % _capacity;
+			_count = _capacity - data.Length;
+		}
+
+		Span<byte> bufferSpan = _rentedArray.AsSpan();
+
+		if (_writePosition + data.Length <= _capacity) {
+			data.CopyTo(bufferSpan.Slice(_writePosition, data.Length));
+			_writePosition = (_writePosition + data.Length) % _capacity;
+		} else {
+			int firstPartSize = _capacity - _writePosition;
+			data[..firstPartSize].CopyTo(bufferSpan.Slice(_writePosition, firstPartSize));
+			data[firstPartSize..].CopyTo(bufferSpan[.. (data.Length - firstPartSize)]);
+			_writePosition = data.Length - firstPartSize;
+		}
+
+		_count += data.Length;
+	}
+
+	public ReadOnlySpan<byte> Read() {
+		ObjectDisposedException.ThrowIf(_rentedArray is null, this);
+		if (_count == 0) {
+			return ReadOnlySpan<byte>.Empty;
+		}
+
+		Span<byte> bufferSpan = _rentedArray.AsSpan();
+		if (_readPosition + _count <= _capacity) {
+			return bufferSpan.Slice(_readPosition, _count);
+		} else {
+			return bufferSpan.Slice(_readPosition, _capacity - _readPosition);
+		}
+	}
+
+	public void Clear() {
+		_writePosition = 0;
+		_readPosition = 0;
+		_count = 0;
+	}
+
+	public void Dispose() {
+		if (_rentedArray != null) {
+			ArrayPool<byte>.Shared.Return(_rentedArray);
+			_rentedArray = null;
+		}
+	}
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Buffers/ITraceBuffer.cs">
+using System;
+
+namespace Structura.Core.Buffers;
+
+public interface ITraceBuffer : IDisposable {
+	void Write(ReadOnlySpan<byte> data);
+	ReadOnlySpan<byte> Read();
+	void Clear();
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Deconstruction/DeconstructiveEvaluator.cs">
+using System;
+
+namespace Structura.Core.Deconstruction;
+
+public ref struct DeconstructiveEvaluator {
+	private double _logosThreshold;
+	private readonly double _chaosFactor;
+
+	public DeconstructiveEvaluator(double initialThreshold, double chaosFactor) {
+		_logosThreshold = initialThreshold;
+		_chaosFactor = chaosFactor;
+	}
+
+	public readonly double CurrentThreshold => _logosThreshold;
+
+	public void Deconstruct(ReadOnlySpan<byte> traceData) {
+		if (traceData.IsEmpty) {
+			return;
+		}
+		double signalSum = 0;
+		for (int i = 0; i < traceData.Length; i++) {
+			signalSum += traceData[i];
+		}
+		double meanSignal = signalSum / traceData.Length;
+
+		if (meanSignal > _logosThreshold) {
+			_logosThreshold -= (meanSignal - _logosThreshold) * _chaosFactor * 0.01;
+		}
+	}
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Deconstruction/StreamingCriticalityEvaluator.cs">
+using System;
+using System.Runtime.CompilerServices;
+
+namespace Structura.Core.Deconstruction;
+
+public ref struct StreamingCriticalityEvaluator {
+	private readonly double _varianceThreshold;
+	private readonly double _autocorrThreshold;
+
+	public StreamingCriticalityEvaluator(double varianceThreshold = 1.5, double autocorrThreshold = 0.7) {
+		_varianceThreshold = varianceThreshold;
+		_autocorrThreshold = autocorrThreshold;
+	}
+
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	public readonly bool Evaluate(ReadOnlySpan<byte> buffer, out double variance, out double autocorr) {
+		if (buffer.Length < 2) {
+			variance = 0;
+			autocorr = 0;
+			
+			return false;
+		}
+
+		double sum = 0;
+		for (int i = 0; i < buffer.Length; i++) {
+			sum += buffer[i];
+		}
+		double mean = sum / buffer.Length;
+
+		double varianceSum = 0;
+		double covarianceSum = 0;
+
+		double prevDev = buffer[0] - mean;
+		varianceSum += prevDev * prevDev;
+
+		for (int i = 1; i < buffer.Length; i++) {
+			double currDev = buffer[i] - mean;
+			varianceSum += currDev * currDev;
+			covarianceSum += prevDev * currDev;
+			prevDev = currDev;
+		}
+
+		variance = varianceSum / buffer.Length;
+		autocorr = variance > 1e-9 ? (covarianceSum / buffer.Length) / variance : 0;
+
+		return variance > _varianceThreshold && autocorr > _autocorrThreshold;
+	}
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Class1.cs">
+namespace Structura.Core;
+
+public class Class1
+{
+
+}
+</file>
+
+<file path="src/backend-core/Structura.Core/Structura.Core.csproj">
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<Optimize>true</Optimize>
+  </PropertyGroup>
+
+</Project>
+</file>
+
+<file path="src/backend-core/backend-core.csproj">
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<Optimize>true</Optimize>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	</PropertyGroup>
+</Project>
+</file>
+
+<file path="src/backend-core/SocialTelemetryPacket.cs">
+using System.Runtime.InterpoServices;
+
+namespace Structura.Core;
+
+[StructLayout(Layout.Sequential, Pack = 1)]
+public readonly struct SocialTelemetryPacket {
+	public const uint ValidMagic = 0x534F4349;
+
+	public readonly uint Magic;
+	public readonly long TimestampMs;
+	public readonly float SentimentIndex;
+	public readonly float PostVolumeRate;
+
+	public SocialTelemetryPacket(long timestampMs, float sentimentIndex, float postVolumeRate) {
+		Magic = ValidMagic;
+		TimestampMs = timestampMs;
+		SentimentIndex = sentimentIndex;
+		PostVolumeRate = postVolumeRate;
+	}
+	public bool isValid => Magic == ValidMagic;
+}
+</file>
+
+<file path="src/backend-core/Structura.slnx">
+<Solution>
+  <Project Path="Structura.Core/Structura.Core.csproj" />
+  <Project Path="Structura.Tests/Structura.Tests.csproj" />
+</Solution>
+</file>
+
+<file path="src/backend-core/TelemetryPacket.cs">
+using System.Runtime.InteropServices;
+
+namespace Structura.Core;
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public readonly struct TelemetryPacket {
+	public const uint ValidMagic = 0x53545255;
+
+	public readonly uint Magic;
+	public readonly uint AgentId;
+	public readonly long Timestamp;
+	public readonly float CpuUsage;
+	public readonly float MemoryUsage;
+
+	public bool IsValid => Magic == ValidMagic;
+}
+</file>
+
+<file path="src/backend-core/WebBroadcaster.cs">
+using System;
+using System.Net;
+using System.Net.WebSockets;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Structura.Core;
+
+public class WebBroadcaster {
+	private HttpListener? _listener;
+	private WebSocket? _activeSocket;
+	private readonly CancellationTokenSource _cts = new();
+
+	public async Task StartAsync(int port = 8080) {
+		_listener = new HttpListener();
+		_listener.Prefixes.Add($"http://localhost:{port}/ws/");
+		_listener.Start();
+		Console.WriteLine($"[WebBroadcaster] High-speed WebSocket listening on ws://localhost:{port}/ws/");
+
+		_ = Task.Run(async () => {
+				while (!_cts.Token.IsCancellationRequested) {
+					try {
+						var context = await _listener.GetContextAsync();
+						if (context.Request.IsWebSocketRequest) {
+							var wsContext = await context.AcceptWebSocketAsync(subProtocol: null);
+							_activeSocket = wsContext.WebSocket;
+							Console.WriteLine("[WebBroadcaster] Frontend Client Connection via Binary Stream!");
+						}
+					} catch (Exception) {
+					}
+				}
+		}, _cts.Token);
+	}
+
+	public void BroadcastBuffer(ReadOnlySpan<byte> buffer) {
+		if (_activeSocket == null || _activeSocket.State != WebSocketState.Open) {
+			return;
+		}
+		var segment = new ArraySegment<byte>(buffer.ToArray());
+		_ = _activeSocket.SendAsync(segment, WebSocketMessageType.Binary, true, CancellationToken.None);
+	}
+
+	public void Stop() {
+		_cts.Cancel();
+		_listener?.Stop();
+	}
+}
+</file>
+
 <file path="src/gateway-go/analytics/orchestrator.go">
 package analytics
 
@@ -166,16 +554,16 @@ type MetricPoint struct {
 }
 
 type CSDAlertPayload struct {
-	SentimentX0 float64 `json:"senciment_x0"`
+	SentimentX0 float64 `json:"sentiment_x0"`
 	VarianceSigma float64 `json:"variance_sigma"`
-	Metrics []MetricPoint `json:"metric"`
+	Metrics []MetricPoint `json:"metrics"`
 	SolverParams map[string]interface{} `json:"solver_params"`
 }
 
 type JuliaTippingResult struct {
 	TippingProbability float64 `json:"tipping_probability"`
 	MeanTippingTimeSec float64 `json:"mean_tipping_time_sec"`
-	SimulatedTrajectories int `json:"simjlated_trajectories"`
+	SimulatedTrajectories int `json:"simulated_trajectories"`
 }
 
 type RCausalResult struct {
@@ -283,6 +671,831 @@ func (o *AnalyticsOrchestrator) postJSON(ctx context.Context, url string, input 
 
 	return json.NewDecoder(resp.Body).Decode(output)
 }
+</file>
+
+<file path="src/gateway-go/client/analytics_test.go">
+package client
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestEvaluateAll_Success(t *testing.T) {
+	rServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"status": ["SUCCESS"],
+			"is_phase_transition": [false],
+			"metrics": {"variance": [0.0015], "autocorrelation": [-0.8099], "criticality_score": [0.0]},
+			"timestamp": ["2026-07-25 12:00:00"]
+		}`))
+	}))
+	defer rServer.Close()
+
+	juliaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"status": "SUCCESS",
+			"time_steps": [0.0, 5.0],
+			"predicted_queue": [10.0, 260.0],
+			"terminal_queue": 260.0,
+			"overflow_risk": true
+		}`))
+	}))
+	defer juliaServer.Close()
+
+	client := NewAnalyticsClient(rServer.URL, juliaServer.URL)
+	res, err := client.EvaluateAll(context.Background(), []MetricPoint{{Time: 1, Value: 10}}, JuliaSolveRequest{})
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if res.PhaseTransition.Status != "SUCCESS" {
+		t.Errorf("Expected status SUCCESS, got %s", res.PhaseTransition.Status)
+	}
+}
+</file>
+
+<file path="src/gateway-go/handler/analytics.go">
+package handler
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"gateway-go/client"
+)
+
+type AnalyticsHandler struct {
+	client *client.AnalyticsClient
+}
+
+func NewAnalyticsHandler(c *client.AnalyticsClient) *AnalyticsHandler {
+	return &AnalyticsHandler{client: c}
+}
+
+type EvalRequestPayload struct {
+	Metrics []client.MetricPoint `json:"metrics"`
+	SolverParams client.JuliaSolveRequest `json:"solver_params"`
+}
+
+func (h *AnalyticsHandler) HandleEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload EvalRequestPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON body: "+ err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	res, err := h.client.EvaluateAll(r.Context(), payload.Metrics, payload.SolverParams)
+	if err != nil {
+		http.Error(w, "Analytics comutation failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "appliaction/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(res)
+}
+</file>
+
+<file path="src/gateway-go/ingest/receiver_test.go">
+package ingest
+
+import (
+	"testing"
+)
+
+func BenchmarkPacketReceiver_PoolAllocation(b *testing.B) {
+	receiver := NewPacketReceiver("127.0.0.1")
+	testData := []byte("LOG_LEVEL=WARN msg='Logos threshold shifting initiated'")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		bufPtr := receiver.pool.Get().(*[]byte)
+		buf := *bufPtr
+
+		copy(buf, testData)
+
+		receiver.pool.Put(bufPtr)
+	}
+}
+</file>
+
+<file path="src/gateway-go/ingest/receiver.go">
+package ingest
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"sync"
+)
+
+const MaxUDPBufferSize = 65535
+
+type PacketReceiver struct {
+	addr string
+	pool *sync.Pool
+}
+
+func NewPacketReceiver(addr string) *PacketReceiver {
+	return &PacketReceiver {
+		addr : addr,
+		pool: &sync.Pool {
+			New: func() any {
+				b := make([]byte, MaxUDPBufferSize)
+				return &b
+			},
+		},
+	}
+}
+
+func (r *PacketReceiver) Start(ctx context.Context, handler func([]byte)) error {
+	pc, err := net.ListenPacket("udp", r.addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen UDP: %w", err)
+	}
+	defer pc.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			bufPtr := r.pool.Get().(*[]byte)
+			buf := *bufPtr
+
+			n, _, err := pc.ReadFrom(buf)
+			if err != nil {
+				r.pool.Put(bufPtr)
+				continue
+			}
+			handler(buf[:n])
+			r.pool.Put(bufPtr)
+		}
+	}
+}
+</file>
+
+<file path="src/gateway-go/internal/listener/ebpf/bpf/socket_trace.c">
+// +build ignore
+
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+
+struct socket_event {
+	__u32 pid;
+	char comm[16];
+	__u64 timestamp_ns;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 24);
+} events SEC(".maps");
+
+SEC("kprobe/tcp_v4_connect")
+int kprobe__tcp_v4_connect(void *ctx) {
+	struct socket_event *event;
+
+	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	if (!event) {
+		return 0;
+	}
+
+	event->pid = bpf_get_current_pid_tgid() >> 32;
+	bpf_get_current_comm(&event->comm, sizeof(event->comm));
+	event->timestamp_ns = bpf_ktime_get_ns();
+
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+char LICENSE[] SEC("license") = "GPL";
+</file>
+
+<file path="src/gateway-go/internal/listener/ebpf/ebpf_listener.go">
+package ebpf
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
+	"log"
+	"strconv"
+
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
+	"gateway-go/internal/listener"
+)
+
+type socketEvent struct {
+	Pid uint32
+	Comm [16]byte
+	TimestampNs uint64
+}
+
+type EBPFListener struct {
+	objs socketTraceObjects
+	kp link.Link
+}
+
+func NewEBPFListener() *EBPFListener {
+	return &EBPFListener{}
+}
+
+func (l *EBPFListener) Name() string {
+	return "eBPF-Kernel-Listener"
+}
+
+func (l *EBPFListener) Start(ctx context.Context, dataCh chan<- listener.TelemetryData) error {
+	log.Printf("[%s] Loading BPF objects into Linux kernel...", l.Name())
+
+	if err := loadSocketTraceObjects(&l.objs, nil); err != nil {
+		return err 
+	}
+
+	kp, err := link.Kprobe("tcp_v4_connect", l.objs.KprobeTcpV4Connect, nil)
+	if err != nil {
+		l.objs.Close()
+		return err
+	}
+	l.kp = kp
+
+	rd, err := ringbuf.NewReader(l.objs.Events)
+	if err != nil {
+		l.kp.Close()
+		l.objs.Close()
+		return err
+	}
+
+	log.Printf("[%s] Successfully attached kprobe to tcp_v4_connect! Listening for real socket event...", l.Name())
+
+
+	go func() {
+		defer func() {
+			rd.Close()
+			l.kp.Close()
+			l.objs.Close()
+		}()
+
+		go func() {
+			<-ctx.Done()
+			rd.Close()
+		}()
+
+		for {
+			record, err := rd.Read()
+			if err != nil {
+				if errors.Is(err, ringbuf.ErrClosed) {
+					log.Printf("[%s] RingBuffer closed, exiting reader...", l.Name())
+					return
+				}
+				log.Printf("[%s] RingBuffer read error: %v", l.Name(), err)
+				continue
+			}
+
+			var event socketEvent
+			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+				log.Printf("[%s] Failed to parse ringbuf record: %v", l.Name(), err)
+				continue
+			}
+
+			commStr := string(bytes.TrimRight(event.Comm[:], "\x00"))
+
+
+			dataCh <- listener.TelemetryData {
+				Timestamp: int64(event.TimestampNs),
+				Source: "ebpf",
+				Metric: "kernel_tcp_connect_event",
+				Value: 1.0,
+				Tags: map[string]string {
+					"pid": strconv.Itoa(int(event.Pid)),
+					"comm": commStr,
+				},
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (l *EBPFListener) Stop() error {
+	return nil
+}
+</file>
+
+<file path="src/gateway-go/internal/listener/ebpf/gen.go">
+package ebpf
+
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpf socketTrace bpf/socket_trace.c
+</file>
+
+<file path="src/gateway-go/internal/listener/ebpf/sockettrace_bpf.go">
+// Code generated by bpf2go; DO NOT EDIT.
+
+package ebpf
+
+import (
+	"bytes"
+	_ "embed"
+	"fmt"
+	"io"
+
+	"github.com/cilium/ebpf"
+)
+
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	socketTraceMapEvents              = "events"
+	socketTraceProgKprobeTcpV4Connect = "kprobe__tcp_v4_connect"
+)
+
+// loadSocketTrace returns the embedded CollectionSpec for socketTrace.
+func loadSocketTrace() (*ebpf.CollectionSpec, error) {
+	reader := bytes.NewReader(_SocketTraceBytes)
+	spec, err := ebpf.LoadCollectionSpecFromReader(reader)
+	if err != nil {
+		return nil, fmt.Errorf("can't load socketTrace: %w", err)
+	}
+
+	return spec, err
+}
+
+// loadSocketTraceObjects loads socketTrace and converts it into a struct.
+//
+// The following types are suitable as obj argument:
+//
+//	*socketTraceObjects
+//	*socketTracePrograms
+//	*socketTraceMaps
+//
+// See ebpf.CollectionSpec.LoadAndAssign documentation for details.
+func loadSocketTraceObjects(obj any, opts *ebpf.CollectionOptions) error {
+	spec, err := loadSocketTrace()
+	if err != nil {
+		return err
+	}
+
+	return spec.LoadAndAssign(obj, opts)
+}
+
+// socketTraceSpecs contains maps and programs before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type socketTraceSpecs struct {
+	socketTraceProgramSpecs
+	socketTraceMapSpecs
+	socketTraceVariableSpecs
+}
+
+// socketTraceProgramSpecs contains programs before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type socketTraceProgramSpecs struct {
+	KprobeTcpV4Connect *ebpf.ProgramSpec `ebpf:"kprobe__tcp_v4_connect"`
+}
+
+// socketTraceMapSpecs contains maps before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type socketTraceMapSpecs struct {
+	Events *ebpf.MapSpec `ebpf:"events"`
+}
+
+// socketTraceVariableSpecs contains global variables before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type socketTraceVariableSpecs struct {
+}
+
+// socketTraceObjects contains all objects after they have been loaded into the kernel.
+//
+// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type socketTraceObjects struct {
+	socketTracePrograms
+	socketTraceMaps
+	socketTraceVariables
+}
+
+func (o *socketTraceObjects) Close() error {
+	return _SocketTraceClose(
+		&o.socketTracePrograms,
+		&o.socketTraceMaps,
+	)
+}
+
+// socketTraceMaps contains all maps after they have been loaded into the kernel.
+//
+// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type socketTraceMaps struct {
+	Events *ebpf.Map `ebpf:"events"`
+}
+
+func (m *socketTraceMaps) Close() error {
+	return _SocketTraceClose(
+		m.Events,
+	)
+}
+
+// socketTraceVariables contains all global variables after they have been loaded into the kernel.
+//
+// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type socketTraceVariables struct {
+}
+
+// socketTracePrograms contains all programs after they have been loaded into the kernel.
+//
+// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type socketTracePrograms struct {
+	KprobeTcpV4Connect *ebpf.Program `ebpf:"kprobe__tcp_v4_connect"`
+}
+
+func (p *socketTracePrograms) Close() error {
+	return _SocketTraceClose(
+		p.KprobeTcpV4Connect,
+	)
+}
+
+func _SocketTraceClose(closers ...io.Closer) error {
+	for _, closer := range closers {
+		if err := closer.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Do not access this directly.
+//
+//go:embed sockettrace_bpf.o
+var _SocketTraceBytes []byte
+</file>
+
+<file path="src/gateway-go/internal/listener/gnmi/gnmi_listener.go">
+package gnmi
+
+import (
+	"context"
+	"log"
+	"math/rand"
+	"time"
+
+	"gateway-go/internal/listener"
+)
+
+type GNMIListener struct {
+	running bool
+}
+
+func NewGNMIListener() *GNMIListener {
+	return &GNMIListener{}
+}
+
+func (l *GNMIListener) Name() string {
+	return "gNMI-gRPC-Listener"
+}
+
+func (l *GNMIListener) Start(ctx context.Context, dataCh chan<- listener.TelemetryData) error {
+	l.running = true
+	log.Printf("[%s] Initializing gNMI gRPC Telemetry Stream Subscriptions...", l.Name())
+
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("[%s] Stopping gNMI Listener...", l.Name())
+				return
+			case t := <-ticker.C:
+				simulatedInOctets := float64(1000000 + rand.Intn(500000))
+
+				dataCh <- listener.TelemetryData {
+					Timestamp: t.UnixNano(),
+					Source: "gnmi",
+					Metric: "interface_in_octets_bytes",
+					Value: simulatedInOctets,
+					Tags: map[string]string {
+						"device": "core-router-01",
+						"interface": "Ethernet1/1",
+					},
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (l *GNMIListener) Stop() error {
+	l.running = false
+	return nil
+}
+</file>
+
+<file path="src/gateway-go/internal/listener/listener.go">
+package listener
+
+import "context"
+
+type TelemetryData struct {
+	Timestamp int64 `json:"timestamp"`
+	Source string `json:"source"`
+	Metric string `json:"metric"`
+	Value float64 `json:"value"`
+	Tags map[string]string `json:"tags"`
+}
+
+type TelemetryListener interface {
+	Name() string
+	Start(ctx context.Context, dataCh chan<- TelemetryData) error
+	Stop() error
+}
+</file>
+
+<file path="src/simulation/analyze_criticality.R">
+library(arrow)
+library(tidyverse)
+library(mgcv)
+
+df <- read_parquet("fanaticism_simulation_log.parquet")
+gam_model <- gam(order_parameter_m ~ s(temperature_T, k = 15), data = df)
+T_grid <- seq(min(df$temperature_T), max(df$temperature_T), length.out = 1000)
+eps <- 1e-5
+pred_m <- predict(gam_model, newdata = data.frame(temperature_T = T_grid))
+pred_m_eps <- predict(gam_model, newdata = data.frame(temperature_T = T_grid + eps))
+dm_dT <- (pred_m_eps - pred_m) / eps
+tc_index <- which.max(abs(dm_dT))
+Tc <- T_grid[tc_index]
+cat("\n============================\n")
+cat(sprintf("[Completed] Detected Tc: %.4f\n", Tc))
+cat("============================\n\n")
+
+analysis_df <- data.frame(T = T_grid, m = pred_m, slope = abs(dm_dT))
+
+p <- ggplot() +
+	geom_point(data = df, aes(x = temperature_T, y = order_parameter_m), alpha = 0.3, color = "gray30") +
+	geom_line(data = analysis_df, aes(x = T, y = m), color = "purple", size = 1.2) +
+	geom_vline(xintercept = Tc, color = "red", linetype = "dashed", size = 1) +
+	annotate("text", x = Tc + 0.15, y = 0, label = sprintf("Tc ~ %.3f", Tc), color = "red", fontface = "bold", size = 5) +
+	scale_x_reverse() +
+	labs(
+			 title = "Non-Linear GAM Fitting & Critical Boundary (Tc) Detection",
+			 subtitle = "Red dashed line indicates the inflection point where phase transition accelerates.",
+			 x = "Social Stress / Temprature (T)",
+			 y = "Order Parameter (m)"
+	) +
+	theme_minimal()
+
+ggsave("r_criticality_analysis.png", plot = p, width = 8, height = 5, dpi = 300)
+cat("Plot saved as 'r_criticality_analysis.png'.\n")
+</file>
+
+<file path="src/simulation/fanaticism_simulation.py">
+import numpy as np
+import pandas as pd
+from scipy.stats import gumbel_r
+
+class CelebrityFanaticismSim:
+	def __init__(self, num_agents=10000, alpha=0.3, gamma=1.5, mu_bias=0.25):
+		self.N = num_agents
+		self.alpha = alpha
+		self.gamma = gamma
+		self.mu_bias = mu_bias
+
+		self.states = np.random.choice([-1, 1], size=self.N, p=[0.9, 0.1])
+
+		self.A_i = 0.75
+	
+	def compute_celeb_influence(self, current_followers):
+		L_i = gumbel_r.rvs(loc=0, scale=1.0)
+		k_ratio = current_followers / self.N
+		effective_quality = self.alpha * self.A_i + (1 - self.alpha) * max(0, L_i)
+		h_i = effective_quality * (k_ratio**self.gamma)
+		return h_i
+
+	def run(self, steps=1000, J=1.2, initial_temp=5.0, cooling_rate=0.97):
+		history = []
+		T = initial_temp
+
+		for step in range(steps):
+			m = np.mean(self.states)
+			followers = np.sum(self.states == 1)
+			h_i = self.compute_celeb_influence(followers)
+			eff_field = J * m + h_i + self.mu_bias
+			p_fanatic = 1.0 / (1.0 + np.exp(-2.0 * eff_field / T))
+			self.states = np.where(np.random.rand(self.N) < p_fanatic, 1, -1)
+			history.append(
+					{
+						"step": step,
+						"temperature_T": T,
+						"order_parameter_m": m,
+						"fanatic_ratio": followers / self.N,
+						"celeb_influence_h": h_i,
+					}
+			)
+			T *= cooling_rate
+		return pd.DataFrame(history)
+
+if __name__ == "__main__":
+	sim = CelebrityFanaticismSim(num_agents=10000)
+	df_result = sim.run(steps=1000, J=1.2, initial_temp=5.0)
+	df_result.to_parquet("fanaticism_simulation_log.parquet")
+	print("Simulation completed. Saved to 'fanaticism_simulation_log.parquet'.")
+	print(df_result.tail(10))
+</file>
+
+<file path="src/simulation/plot_phase_transition.py">
+import pandas as pd
+import matplotlib.pyplot as plt
+
+df = pd.read_parquet("fanaticism_simulation_log.parquet")
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+color_m = 'tab:red'
+ax1.set_xlabel('Step', fontsize=11)
+ax1.set_ylabel('Order Parameter (m)', color=color_m, fontsize=11)
+ax1.plot(df['step'], df['order_parameter_m'], color=color_m, linewidth=2.5, label='Order Parameter (m)')
+ax1.tick_params(axis='y', labelcolor=color_m)
+ax1.set_ylim(-1.1, 1.1)
+ax1_twin = ax1.twinx()
+color_t = 'tab:blue'
+ax1_twin.set_ylabel('Tempertature / Stress (T)', color=color_t, fontsize=11)
+ax1_twin.plot(df['step'], df['temperature_T'], color=color_t, linestyle='--', linewidth=1.5, label='Temperature (T)')
+ax1.set_title('Time Series: Jump to Fanaticism', fontsize=12, fontweight='bold')
+ax1.grid(True, alpha=0.3)
+
+ax2.plot(df['temperature_T'], df['order_parameter_m'], marker='o', markersize=4, color='purple', linestyle='-')
+ax2.invert_xaxis()
+ax2.set_xlabel('Social Stress / Temperature (T) [Decaying]', fontsize=11)
+ax2.set_ylabel('Order Parameter (m)', fontsize=11)
+ax2.set_title('Phase Diagram: Criticality Boundary', fontsize=12, fontweight='bold')
+ax2.set_ylim(-1.1, 1.1)
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig("phase_transition_plot.png", dpi=300)
+print("Graph saved successfully as 'phase_transition_plot.png'.")
+</file>
+
+<file path="src/simulation/requirements.txt">
+numpy
+pandas
+scipy
+pyarrow
+matplotlib
+</file>
+
+<file path="src/simulation-py/app/__init__.py">
+
+</file>
+
+<file path="src/simulation-py/app/agent.py">
+import asyncio
+import random
+import time
+import logging
+from app.models import TelemetryData
+from app.client import GatewayClient
+
+class Agent:
+	def __init__(self, agent_id: str, client: GatewayClient):
+		self.agent_id = agent_id
+		self.client = client
+		self.is_running = False
+	
+	async def run(self, interval_sec: float = 1.0):
+		self.is_running = True
+		logging.info(f"Agent [{self.agent_id}] started.")
+
+		while self.is_running:
+			telemetry = TelemetryData(
+					agent_id=self.agent_id,
+					timestamp=time.time(),
+					status="ACTIVE",
+					metrics={
+						"cpu_usage": round(random.uniform(10.0, 90.0), 2),
+						"memory_mb": random.randint(128, 1024),
+					}
+			)
+
+			await self.client.send_telemetry(telemetry.to_dict())
+			jitter = random.uniform(-0.1, 0.1)
+			await asyncio.sleep(max(0.1, interval_sec + jitter))
+
+	def stop(self):
+		self.is_running = False
+</file>
+
+<file path="src/simulation-py/app/client.py">
+import socket
+import json
+import logging
+
+class GatewayClient:
+	def __init__(self, host: str = "127.0.0.1", port: int = 8080):
+		self.host = host
+		self.port = port
+		self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+	async def send_telemetry(self, data: dict) -> bool:
+		try:
+			payload = json.dumps(data).encode('utf-8')
+			self.sock.sendto(payload, (self.host, self.port))
+			return True
+		except Exception as e:
+			logging.error(f"Failed to send UDP packet: {e}")
+			return False
+	
+	async def close(self):
+		self.sock.close()
+</file>
+
+<file path="src/simulation-py/app/models.py">
+import time
+from dataclasses import dataclass, asdict
+
+@dataclass
+class TelemetryData:
+	agent_id: str
+	timestamp: float
+	status: str
+	metrics: dict
+
+	def to_dict(self) -> dict:
+		return asdict(self)
+</file>
+
+<file path="src/simulation-py/requirement.txt">
+httpx?=0.27.0
+</file>
+
+<file path="src/simulation-py/social_stream_sim.py">
+import socket
+import struct
+import time
+import math
+import random
+import numpy as np
+
+GATEWAY_ADDR = ("127.0.0.1", 8080)
+MAGIC_SOCI = 0x534F4349;
+
+def simulate_social_dynamics(steps=1000):
+	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+	print(f"[Social Sim] Streaming social sentiment packets to {GATEWAY_ADDR}...")
+
+	N = 1000
+	states = np.random.choice([-1, 1], size=N, p=[0.5, 0.5])
+	T = 4.0
+	J = 1.2
+
+	try:
+		for step in range(steps):
+			m = np.mean(states)
+
+			h_ext = np.random.gumbel(0, 0.5) if random.random() < 0.05 else 0.0
+			eff_field = J * m + h_ext
+
+			p_positive = 1.0 / (1.0 + np.exp(-2.0 * eff_field / max(0.1, T)))
+			states = np.where(np.random.rand(N) < p_positive, 1, -1)
+
+			sentiment_index = float(np.mean(states))
+			post_volume = float(N * (1.0 + abs(sentiment_index) * 2.0) + random.uniform(-50, 50))
+			T *= 0.995
+
+			timestamp_ms = int(time.time() * 1000)
+			packet = struct.pack("<iqff", MAGIC_SOCI, timestamp_ms, sentiment_index, post_volume)
+
+			sock.sendto(packet, GATEWAY_ADDR)
+			time.sleep(0.01)
+
+			if step % 100 = 0:
+				print(f"[Step {step:04d}] Temp: {T:.2f} | Sentiment (m): {ssentiment_index:+.3f} | Posts/s: {post_volume:.0f}")
+
+	finally:
+		sock.close()
+
+if __name__ == "__main__":
+	simulate_social_dynamics()
 </file>
 
 <file path="src/solver-julia/src/Manifest.toml">
@@ -2123,6 +3336,20 @@ end # module
 TippingSolver.start_server(8081)
 </file>
 
+<file path="src/solver-julia/Dockerfile">
+FROM julia:1.10
+
+WORKDIR /app
+
+RUN julia -e 'using Pkg; Pkg.add(["DifferentialEquations", "HTTP", "JSON3"])'
+
+COPY . .
+
+EXPOSE 8081
+
+CMD ["julia", "src/main.jl"]
+</file>
+
 <file path="src/solver-julia/Manifest.toml">
 # This file is machine-generated - editing it directly is not advised
 
@@ -3823,1417 +5050,6 @@ uuid = "3f19e933-33d8-53b3-aaab-bd5110c3b7a0"
 version = "17.7.0+0"
 </file>
 
-<file path="src/backend-core/Ipc/UnixDomainSocketListener.cs">
-using System;
-using System.Buffers;
-using System.IO;
-using System.Net.Sockets;
-using System.Threading;
-using System.Threading.Tasks;
-using Structura.Core.Buffers;
-
-namespace Structura.Core.Ipc;
-
-public sealed class UnixDomainSocketListener {
-	private readonly string _socketPath;
-	private readonly AllocationFreeBuffer _buffer;
-	private Socket? _listenerSocket;
-
-	public UnixDomainSocketListener(string socketPath, AllocationFreeBuffer buffer) {
-		_socketPath = socketPath;
-		_buffer = buffer;
-	}
-
-	public async Task StartAsync(CancellationToken cancellationToken) {
-		if (File.Exists(_socketPath)) {
-			File.Delete(_socketPath);
-		}
-
-		var endPoint = new UnixDomainSocketEndPoint(_socketPath);
-		_listenerSocket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-
-		_listenerSocket.Bind(endPoint);
-		_listenerSocket.Listen(128);
-
-		Console.WriteLine($"[C# Core] IPC Listener started on {_socketPath}");
-
-		try {
-			while (!cancellationToken.IsCancellationRequested) {
-				Socket clientSocket = await _listenerSocket.AcceptAsync(cancellationToken);
-				_ = HandleClientAsync(clientSocket, cancellationToken);
-			}
-		} catch (OperationCanceledException) {
-		} finally {
-			Cleanup();
-		}
-	}
-
-	private async Task HandleClientAsync(Socket clientSocket, CancellationToken cancellationToken) {
-		using (clientSocket) {
-			byte[] receiveBuffer = ArrayPool<byte>.Shared.Rent(65535);
-			try {
-				while (!cancellationToken.IsCancellationRequested) {
-					int bytesRead = await clientSocket.ReceiveAsync(
-							receiveBuffer.AsMemory(),
-							SocketFlags.None,
-							cancellationToken
-					);
-					
-					if (bytesRead == 0) {
-						break;
-					}
-
-					_buffer.Write(receiveBuffer.AsSpan(0, bytesRead));
-					Console.WriteLine($"[C# Core] IPC Received: {bytesRead} byte from Go Gateway");
-				}
-			} catch (Exception ex) when (ex is not OperationCanceledException) {
-				Console.WriteLine($"[C# Core] IPC Connection error: {ex.Message}");
-			} finally {
-				ArrayPool<byte>.Shared.Return(receiveBuffer);
-			}
-		}
-	}
-
-	private void Cleanup() {
-		_listenerSocket?.Close();
-		if (File.Exists(_socketPath)) {
-			File.Delete(_socketPath);
-		}
-		Console.WriteLine("[C# Core] IPC Listener stopped & socket cleaned up.");
-	}
-}
-</file>
-
-<file path="src/backend-core/Structura.Core/Buffers/AllocationFreeBuffer.cs">
-using System;
-using System.Buffers;
-
-namespace Structura.Core.Buffers;
-
-public sealed class AllocationFreeBuffer : ITraceBuffer {
-	private readonly int _capacity;
-	private byte[]? _rentedArray;
-	private int _writePosition;
-	private int _readPosition;
-	private int _count;
-
-	public AllocationFreeBuffer(int capacity) {
-		_capacity = capacity;
-		_rentedArray = ArrayPool<byte>.Shared.Rent(capacity);
-	}
-
-	public void Write(ReadOnlySpan<byte> data) {
-		ObjectDisposedException.ThrowIf(_rentedArray is null, this);
-
-		if (data.Length > _capacity) {
-			throw new ArgumentOutOfRangeException(nameof(data), "datasize exceeded.");
-		}
-
-		int availableSpace = _capacity - _count;
-		if (data.Length > availableSpace) {
-			_readPosition = (_readPosition + (data.Length - availableSpace)) % _capacity;
-			_count = _capacity - data.Length;
-		}
-
-		Span<byte> bufferSpan = _rentedArray.AsSpan();
-
-		if (_writePosition + data.Length <= _capacity) {
-			data.CopyTo(bufferSpan.Slice(_writePosition, data.Length));
-			_writePosition = (_writePosition + data.Length) % _capacity;
-		} else {
-			int firstPartSize = _capacity - _writePosition;
-			data[..firstPartSize].CopyTo(bufferSpan.Slice(_writePosition, firstPartSize));
-			data[firstPartSize..].CopyTo(bufferSpan[.. (data.Length - firstPartSize)]);
-			_writePosition = data.Length - firstPartSize;
-		}
-
-		_count += data.Length;
-	}
-
-	public ReadOnlySpan<byte> Read() {
-		ObjectDisposedException.ThrowIf(_rentedArray is null, this);
-		if (_count == 0) {
-			return ReadOnlySpan<byte>.Empty;
-		}
-
-		Span<byte> bufferSpan = _rentedArray.AsSpan();
-		if (_readPosition + _count <= _capacity) {
-			return bufferSpan.Slice(_readPosition, _count);
-		} else {
-			return bufferSpan.Slice(_readPosition, _capacity - _readPosition);
-		}
-	}
-
-	public void Clear() {
-		_writePosition = 0;
-		_readPosition = 0;
-		_count = 0;
-	}
-
-	public void Dispose() {
-		if (_rentedArray != null) {
-			ArrayPool<byte>.Shared.Return(_rentedArray);
-			_rentedArray = null;
-		}
-	}
-}
-</file>
-
-<file path="src/backend-core/Structura.Core/Buffers/ITraceBuffer.cs">
-using System;
-
-namespace Structura.Core.Buffers;
-
-public interface ITraceBuffer : IDisposable {
-	void Write(ReadOnlySpan<byte> data);
-	ReadOnlySpan<byte> Read();
-	void Clear();
-}
-</file>
-
-<file path="src/backend-core/Structura.Core/Deconstruction/DeconstructiveEvaluator.cs">
-using System;
-
-namespace Structura.Core.Deconstruction;
-
-public ref struct DeconstructiveEvaluator {
-	private double _logosThreshold;
-	private readonly double _chaosFactor;
-
-	public DeconstructiveEvaluator(double initialThreshold, double chaosFactor) {
-		_logosThreshold = initialThreshold;
-		_chaosFactor = chaosFactor;
-	}
-
-	public readonly double CurrentThreshold => _logosThreshold;
-
-	public void Deconstruct(ReadOnlySpan<byte> traceData) {
-		if (traceData.IsEmpty) {
-			return;
-		}
-		double signalSum = 0;
-		for (int i = 0; i < traceData.Length; i++) {
-			signalSum += traceData[i];
-		}
-		double meanSignal = signalSum / traceData.Length;
-
-		if (meanSignal > _logosThreshold) {
-			_logosThreshold -= (meanSignal - _logosThreshold) * _chaosFactor * 0.01;
-		}
-	}
-}
-</file>
-
-<file path="src/backend-core/Structura.Core/Deconstruction/StreamingCriticalityEvaluator.cs">
-using System;
-using System.Runtime.CompilerServices;
-
-namespace Structura.Core.Deconstruction;
-
-public ref struct StreamingCriticalityEvaluator {
-	private readonly double _varianceThreshold;
-	private readonly double _autocorrThreshold;
-
-	public StreamingCriticalityEvaluator(double varianceThreshold = 1.5, double autocorrThreshold = 0.7) {
-		_varianceThreshold = varianceThreshold;
-		_autocorrThreshold = autocorrThreshold;
-	}
-
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
-	public readonly bool Evaluate(ReadOnlySpan<byte> buffer, out double variance, out double autocorr) {
-		if (buffer.Length < 2) {
-			variance = 0;
-			autocorr = 0;
-			
-			return false;
-		}
-
-		double sum = 0;
-		for (int i = 0; i < buffer.Length; i++) {
-			sum += buffer[i];
-		}
-		double mean = sum / buffer.Length;
-
-		double varianceSum = 0;
-		double covarianceSum = 0;
-
-		double prevDev = buffer[0] - mean;
-		varianceSum += prevDev * prevDev;
-
-		for (int i = 1; i < buffer.Length; i++) {
-			double currDev = buffer[i] - mean;
-			varianceSum += currDev * currDev;
-			covarianceSum += prevDev * currDev;
-			prevDev = currDev;
-		}
-
-		variance = varianceSum / buffer.Length;
-		autocorr = variance > 1e-9 ? (covarianceSum / buffer.Length) / variance : 0;
-
-		return variance > _varianceThreshold && autocorr > _autocorrThreshold;
-	}
-}
-</file>
-
-<file path="src/backend-core/Structura.Core/Class1.cs">
-namespace Structura.Core;
-
-public class Class1
-{
-
-}
-</file>
-
-<file path="src/backend-core/Structura.Core/Structura.Core.csproj">
-<Project Sdk="Microsoft.NET.Sdk">
-
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-		<Optimize>true</Optimize>
-  </PropertyGroup>
-
-</Project>
-</file>
-
-<file path="src/backend-core/backend-core.csproj">
-<Project Sdk="Microsoft.NET.Sdk">
-	<PropertyGroup>
-		<OutputType>Exe</OutputType>
-		<TargetFramework>net10.0</TargetFramework>
-		<ImplicitUsings>enable</ImplicitUsings>
-		<Nullable>enable</Nullable>
-		<Optimize>true</Optimize>
-		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-	</PropertyGroup>
-</Project>
-</file>
-
-<file path="src/backend-core/SocialTelemetryPacket.cs">
-using System.Runtime.InterpoServices;
-
-namespace Structura.Core;
-
-[StructLayout(Layout.Sequential, Pack = 1)]
-public readonly struct SocialTelemetryPacket {
-	public const uint ValidMagic = 0x534F4349;
-
-	public readonly uint Magic;
-	public readonly long TimestampMs;
-	public readonly float SentimentIndex;
-	public readonly float PostVolumeRate;
-
-	public SocialTelemetryPacket(long timestampMs, float sentimentIndex, float postVolumeRate) {
-		Magic = ValidMagic;
-		TimestampMs = timestampMs;
-		SentimentIndex = sentimentIndex;
-		PostVolumeRate = postVolumeRate;
-	}
-	public bool isValid => Magic == ValidMagic;
-}
-</file>
-
-<file path="src/backend-core/Structura.slnx">
-<Solution>
-  <Project Path="Structura.Core/Structura.Core.csproj" />
-  <Project Path="Structura.Tests/Structura.Tests.csproj" />
-</Solution>
-</file>
-
-<file path="src/backend-core/TelemetryPacket.cs">
-using System.Runtime.InteropServices;
-
-namespace Structura.Core;
-
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public readonly struct TelemetryPacket {
-	public const uint ValidMagic = 0x53545255;
-
-	public readonly uint Magic;
-	public readonly uint AgentId;
-	public readonly long Timestamp;
-	public readonly float CpuUsage;
-	public readonly float MemoryUsage;
-
-	public bool IsValid => Magic == ValidMagic;
-}
-</file>
-
-<file path="src/backend-core/WebBroadcaster.cs">
-using System;
-using System.Net;
-using System.Net.WebSockets;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace Structura.Core;
-
-public class WebBroadcaster {
-	private HttpListener? _listener;
-	private WebSocket? _activeSocket;
-	private readonly CancellationTokenSource _cts = new();
-
-	public async Task StartAsync(int port = 8080) {
-		_listener = new HttpListener();
-		_listener.Prefixes.Add($"http://localhost:{port}/ws/");
-		_listener.Start();
-		Console.WriteLine($"[WebBroadcaster] High-speed WebSocket listening on ws://localhost:{port}/ws/");
-
-		_ = Task.Run(async () => {
-				while (!_cts.Token.IsCancellationRequested) {
-					try {
-						var context = await _listener.GetContextAsync();
-						if (context.Request.IsWebSocketRequest) {
-							var wsContext = await context.AcceptWebSocketAsync(subProtocol: null);
-							_activeSocket = wsContext.WebSocket;
-							Console.WriteLine("[WebBroadcaster] Frontend Client Connection via Binary Stream!");
-						}
-					} catch (Exception) {
-					}
-				}
-		}, _cts.Token);
-	}
-
-	public void BroadcastBuffer(ReadOnlySpan<byte> buffer) {
-		if (_activeSocket == null || _activeSocket.State != WebSocketState.Open) {
-			return;
-		}
-		var segment = new ArraySegment<byte>(buffer.ToArray());
-		_ = _activeSocket.SendAsync(segment, WebSocketMessageType.Binary, true, CancellationToken.None);
-	}
-
-	public void Stop() {
-		_cts.Cancel();
-		_listener?.Stop();
-	}
-}
-</file>
-
-<file path="src/gateway-go/client/analytics_test.go">
-package client
-
-import (
-	"context"
-	"net/http"
-	"net/http/httptest"
-	"testing"
-)
-
-func TestEvaluateAll_Success(t *testing.T) {
-	rServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{
-			"status": ["SUCCESS"],
-			"is_phase_transition": [false],
-			"metrics": {"variance": [0.0015], "autocorrelation": [-0.8099], "criticality_score": [0.0]},
-			"timestamp": ["2026-07-25 12:00:00"]
-		}`))
-	}))
-	defer rServer.Close()
-
-	juliaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{
-			"status": "SUCCESS",
-			"time_steps": [0.0, 5.0],
-			"predicted_queue": [10.0, 260.0],
-			"terminal_queue": 260.0,
-			"overflow_risk": true
-		}`))
-	}))
-	defer juliaServer.Close()
-
-	client := NewAnalyticsClient(rServer.URL, juliaServer.URL)
-	res, err := client.EvaluateAll(context.Background(), []MetricPoint{{Time: 1, Value: 10}}, JuliaSolveRequest{})
-
-	if err != nil {
-		t.Fatalf("Expected no error, got %v", err)
-	}
-	if res.PhaseTransition.Status != "SUCCESS" {
-		t.Errorf("Expected status SUCCESS, got %s", res.PhaseTransition.Status)
-	}
-}
-</file>
-
-<file path="src/gateway-go/handler/analytics.go">
-package handler
-
-import (
-	"encoding/json"
-	"net/http"
-
-	"gateway-go/client"
-)
-
-type AnalyticsHandler struct {
-	client *client.AnalyticsClient
-}
-
-func NewAnalyticsHandler(c *client.AnalyticsClient) *AnalyticsHandler {
-	return &AnalyticsHandler{client: c}
-}
-
-type EvalRequestPayload struct {
-	Metrics []client.MetricPoint `json:"metrics"`
-	SolverParams client.JuliaSolveRequest `json:"solver_params"`
-}
-
-func (h *AnalyticsHandler) HandleEvaluate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var payload EvalRequestPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid JSON body: "+ err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	res, err := h.client.EvaluateAll(r.Context(), payload.Metrics, payload.SolverParams)
-	if err != nil {
-		http.Error(w, "Analytics comutation failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "appliaction/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(res)
-}
-</file>
-
-<file path="src/gateway-go/ingest/receiver_test.go">
-package ingest
-
-import (
-	"testing"
-)
-
-func BenchmarkPacketReceiver_PoolAllocation(b *testing.B) {
-	receiver := NewPacketReceiver("127.0.0.1")
-	testData := []byte("LOG_LEVEL=WARN msg='Logos threshold shifting initiated'")
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		bufPtr := receiver.pool.Get().(*[]byte)
-		buf := *bufPtr
-
-		copy(buf, testData)
-
-		receiver.pool.Put(bufPtr)
-	}
-}
-</file>
-
-<file path="src/gateway-go/ingest/receiver.go">
-package ingest
-
-import (
-	"context"
-	"fmt"
-	"net"
-	"sync"
-)
-
-const MaxUDPBufferSize = 65535
-
-type PacketReceiver struct {
-	addr string
-	pool *sync.Pool
-}
-
-func NewPacketReceiver(addr string) *PacketReceiver {
-	return &PacketReceiver {
-		addr : addr,
-		pool: &sync.Pool {
-			New: func() any {
-				b := make([]byte, MaxUDPBufferSize)
-				return &b
-			},
-		},
-	}
-}
-
-func (r *PacketReceiver) Start(ctx context.Context, handler func([]byte)) error {
-	pc, err := net.ListenPacket("udp", r.addr)
-	if err != nil {
-		return fmt.Errorf("failed to listen UDP: %w", err)
-	}
-	defer pc.Close()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			bufPtr := r.pool.Get().(*[]byte)
-			buf := *bufPtr
-
-			n, _, err := pc.ReadFrom(buf)
-			if err != nil {
-				r.pool.Put(bufPtr)
-				continue
-			}
-			handler(buf[:n])
-			r.pool.Put(bufPtr)
-		}
-	}
-}
-</file>
-
-<file path="src/gateway-go/internal/listener/ebpf/bpf/socket_trace.c">
-// +build ignore
-
-#include <linux/bpf.h>
-#include <bpf/bpf_helpers.h>
-
-struct socket_event {
-	__u32 pid;
-	char comm[16];
-	__u64 timestamp_ns;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 1 << 24);
-} events SEC(".maps");
-
-SEC("kprobe/tcp_v4_connect")
-int kprobe__tcp_v4_connect(void *ctx) {
-	struct socket_event *event;
-
-	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
-	if (!event) {
-		return 0;
-	}
-
-	event->pid = bpf_get_current_pid_tgid() >> 32;
-	bpf_get_current_comm(&event->comm, sizeof(event->comm));
-	event->timestamp_ns = bpf_ktime_get_ns();
-
-	bpf_ringbuf_submit(event, 0);
-	return 0;
-}
-
-char LICENSE[] SEC("license") = "GPL";
-</file>
-
-<file path="src/gateway-go/internal/listener/ebpf/ebpf_listener.go">
-package ebpf
-
-import (
-	"bytes"
-	"context"
-	"encoding/binary"
-	"errors"
-	"log"
-	"strconv"
-
-	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/ringbuf"
-	"gateway-go/internal/listener"
-)
-
-type socketEvent struct {
-	Pid uint32
-	Comm [16]byte
-	TimestampNs uint64
-}
-
-type EBPFListener struct {
-	objs socketTraceObjects
-	kp link.Link
-}
-
-func NewEBPFListener() *EBPFListener {
-	return &EBPFListener{}
-}
-
-func (l *EBPFListener) Name() string {
-	return "eBPF-Kernel-Listener"
-}
-
-func (l *EBPFListener) Start(ctx context.Context, dataCh chan<- listener.TelemetryData) error {
-	log.Printf("[%s] Loading BPF objects into Linux kernel...", l.Name())
-
-	if err := loadSocketTraceObjects(&l.objs, nil); err != nil {
-		return err 
-	}
-
-	kp, err := link.Kprobe("tcp_v4_connect", l.objs.KprobeTcpV4Connect, nil)
-	if err != nil {
-		l.objs.Close()
-		return err
-	}
-	l.kp = kp
-
-	rd, err := ringbuf.NewReader(l.objs.Events)
-	if err != nil {
-		l.kp.Close()
-		l.objs.Close()
-		return err
-	}
-
-	log.Printf("[%s] Successfully attached kprobe to tcp_v4_connect! Listening for real socket event...", l.Name())
-
-
-	go func() {
-		defer func() {
-			rd.Close()
-			l.kp.Close()
-			l.objs.Close()
-		}()
-
-		go func() {
-			<-ctx.Done()
-			rd.Close()
-		}()
-
-		for {
-			record, err := rd.Read()
-			if err != nil {
-				if errors.Is(err, ringbuf.ErrClosed) {
-					log.Printf("[%s] RingBuffer closed, exiting reader...", l.Name())
-					return
-				}
-				log.Printf("[%s] RingBuffer read error: %v", l.Name(), err)
-				continue
-			}
-
-			var event socketEvent
-			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
-				log.Printf("[%s] Failed to parse ringbuf record: %v", l.Name(), err)
-				continue
-			}
-
-			commStr := string(bytes.TrimRight(event.Comm[:], "\x00"))
-
-
-			dataCh <- listener.TelemetryData {
-				Timestamp: int64(event.TimestampNs),
-				Source: "ebpf",
-				Metric: "kernel_tcp_connect_event",
-				Value: 1.0,
-				Tags: map[string]string {
-					"pid": strconv.Itoa(int(event.Pid)),
-					"comm": commStr,
-				},
-			}
-		}
-	}()
-
-	return nil
-}
-
-func (l *EBPFListener) Stop() error {
-	return nil
-}
-</file>
-
-<file path="src/gateway-go/internal/listener/ebpf/gen.go">
-package ebpf
-
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpf socketTrace bpf/socket_trace.c
-</file>
-
-<file path="src/gateway-go/internal/listener/ebpf/sockettrace_bpf.go">
-// Code generated by bpf2go; DO NOT EDIT.
-
-package ebpf
-
-import (
-	"bytes"
-	_ "embed"
-	"fmt"
-	"io"
-
-	"github.com/cilium/ebpf"
-)
-
-// Names of all BPF objects in the ELF.
-//
-// Used for safe lookups in a Collection or CollectionSpec.
-const (
-	socketTraceMapEvents              = "events"
-	socketTraceProgKprobeTcpV4Connect = "kprobe__tcp_v4_connect"
-)
-
-// loadSocketTrace returns the embedded CollectionSpec for socketTrace.
-func loadSocketTrace() (*ebpf.CollectionSpec, error) {
-	reader := bytes.NewReader(_SocketTraceBytes)
-	spec, err := ebpf.LoadCollectionSpecFromReader(reader)
-	if err != nil {
-		return nil, fmt.Errorf("can't load socketTrace: %w", err)
-	}
-
-	return spec, err
-}
-
-// loadSocketTraceObjects loads socketTrace and converts it into a struct.
-//
-// The following types are suitable as obj argument:
-//
-//	*socketTraceObjects
-//	*socketTracePrograms
-//	*socketTraceMaps
-//
-// See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadSocketTraceObjects(obj any, opts *ebpf.CollectionOptions) error {
-	spec, err := loadSocketTrace()
-	if err != nil {
-		return err
-	}
-
-	return spec.LoadAndAssign(obj, opts)
-}
-
-// socketTraceSpecs contains maps and programs before they are loaded into the kernel.
-//
-// It can be passed ebpf.CollectionSpec.Assign.
-type socketTraceSpecs struct {
-	socketTraceProgramSpecs
-	socketTraceMapSpecs
-	socketTraceVariableSpecs
-}
-
-// socketTraceProgramSpecs contains programs before they are loaded into the kernel.
-//
-// It can be passed ebpf.CollectionSpec.Assign.
-type socketTraceProgramSpecs struct {
-	KprobeTcpV4Connect *ebpf.ProgramSpec `ebpf:"kprobe__tcp_v4_connect"`
-}
-
-// socketTraceMapSpecs contains maps before they are loaded into the kernel.
-//
-// It can be passed ebpf.CollectionSpec.Assign.
-type socketTraceMapSpecs struct {
-	Events *ebpf.MapSpec `ebpf:"events"`
-}
-
-// socketTraceVariableSpecs contains global variables before they are loaded into the kernel.
-//
-// It can be passed ebpf.CollectionSpec.Assign.
-type socketTraceVariableSpecs struct {
-}
-
-// socketTraceObjects contains all objects after they have been loaded into the kernel.
-//
-// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
-type socketTraceObjects struct {
-	socketTracePrograms
-	socketTraceMaps
-	socketTraceVariables
-}
-
-func (o *socketTraceObjects) Close() error {
-	return _SocketTraceClose(
-		&o.socketTracePrograms,
-		&o.socketTraceMaps,
-	)
-}
-
-// socketTraceMaps contains all maps after they have been loaded into the kernel.
-//
-// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
-type socketTraceMaps struct {
-	Events *ebpf.Map `ebpf:"events"`
-}
-
-func (m *socketTraceMaps) Close() error {
-	return _SocketTraceClose(
-		m.Events,
-	)
-}
-
-// socketTraceVariables contains all global variables after they have been loaded into the kernel.
-//
-// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
-type socketTraceVariables struct {
-}
-
-// socketTracePrograms contains all programs after they have been loaded into the kernel.
-//
-// It can be passed to loadSocketTraceObjects or ebpf.CollectionSpec.LoadAndAssign.
-type socketTracePrograms struct {
-	KprobeTcpV4Connect *ebpf.Program `ebpf:"kprobe__tcp_v4_connect"`
-}
-
-func (p *socketTracePrograms) Close() error {
-	return _SocketTraceClose(
-		p.KprobeTcpV4Connect,
-	)
-}
-
-func _SocketTraceClose(closers ...io.Closer) error {
-	for _, closer := range closers {
-		if err := closer.Close(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Do not access this directly.
-//
-//go:embed sockettrace_bpf.o
-var _SocketTraceBytes []byte
-</file>
-
-<file path="src/gateway-go/internal/listener/gnmi/gnmi_listener.go">
-package gnmi
-
-import (
-	"context"
-	"log"
-	"math/rand"
-	"time"
-
-	"gateway-go/internal/listener"
-)
-
-type GNMIListener struct {
-	running bool
-}
-
-func NewGNMIListener() *GNMIListener {
-	return &GNMIListener{}
-}
-
-func (l *GNMIListener) Name() string {
-	return "gNMI-gRPC-Listener"
-}
-
-func (l *GNMIListener) Start(ctx context.Context, dataCh chan<- listener.TelemetryData) error {
-	l.running = true
-	log.Printf("[%s] Initializing gNMI gRPC Telemetry Stream Subscriptions...", l.Name())
-
-	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				log.Printf("[%s] Stopping gNMI Listener...", l.Name())
-				return
-			case t := <-ticker.C:
-				simulatedInOctets := float64(1000000 + rand.Intn(500000))
-
-				dataCh <- listener.TelemetryData {
-					Timestamp: t.UnixNano(),
-					Source: "gnmi",
-					Metric: "interface_in_octets_bytes",
-					Value: simulatedInOctets,
-					Tags: map[string]string {
-						"device": "core-router-01",
-						"interface": "Ethernet1/1",
-					},
-				}
-			}
-		}
-	}()
-
-	return nil
-}
-
-func (l *GNMIListener) Stop() error {
-	l.running = false
-	return nil
-}
-</file>
-
-<file path="src/gateway-go/internal/listener/listener.go">
-package listener
-
-import "context"
-
-type TelemetryData struct {
-	Timestamp int64 `json:"timestamp"`
-	Source string `json:"source"`
-	Metric string `json:"metric"`
-	Value float64 `json:"value"`
-	Tags map[string]string `json:"tags"`
-}
-
-type TelemetryListener interface {
-	Name() string
-	Start(ctx context.Context, dataCh chan<- TelemetryData) error
-	Stop() error
-}
-</file>
-
-<file path="src/simulation/analyze_criticality.R">
-library(arrow)
-library(tidyverse)
-library(mgcv)
-
-df <- read_parquet("fanaticism_simulation_log.parquet")
-gam_model <- gam(order_parameter_m ~ s(temperature_T, k = 15), data = df)
-T_grid <- seq(min(df$temperature_T), max(df$temperature_T), length.out = 1000)
-eps <- 1e-5
-pred_m <- predict(gam_model, newdata = data.frame(temperature_T = T_grid))
-pred_m_eps <- predict(gam_model, newdata = data.frame(temperature_T = T_grid + eps))
-dm_dT <- (pred_m_eps - pred_m) / eps
-tc_index <- which.max(abs(dm_dT))
-Tc <- T_grid[tc_index]
-cat("\n============================\n")
-cat(sprintf("[Completed] Detected Tc: %.4f\n", Tc))
-cat("============================\n\n")
-
-analysis_df <- data.frame(T = T_grid, m = pred_m, slope = abs(dm_dT))
-
-p <- ggplot() +
-	geom_point(data = df, aes(x = temperature_T, y = order_parameter_m), alpha = 0.3, color = "gray30") +
-	geom_line(data = analysis_df, aes(x = T, y = m), color = "purple", size = 1.2) +
-	geom_vline(xintercept = Tc, color = "red", linetype = "dashed", size = 1) +
-	annotate("text", x = Tc + 0.15, y = 0, label = sprintf("Tc ~ %.3f", Tc), color = "red", fontface = "bold", size = 5) +
-	scale_x_reverse() +
-	labs(
-			 title = "Non-Linear GAM Fitting & Critical Boundary (Tc) Detection",
-			 subtitle = "Red dashed line indicates the inflection point where phase transition accelerates.",
-			 x = "Social Stress / Temprature (T)",
-			 y = "Order Parameter (m)"
-	) +
-	theme_minimal()
-
-ggsave("r_criticality_analysis.png", plot = p, width = 8, height = 5, dpi = 300)
-cat("Plot saved as 'r_criticality_analysis.png'.\n")
-</file>
-
-<file path="src/simulation/fanaticism_simulation.py">
-import numpy as np
-import pandas as pd
-from scipy.stats import gumbel_r
-
-class CelebrityFanaticismSim:
-	def __init__(self, num_agents=10000, alpha=0.3, gamma=1.5, mu_bias=0.25):
-		self.N = num_agents
-		self.alpha = alpha
-		self.gamma = gamma
-		self.mu_bias = mu_bias
-
-		self.states = np.random.choice([-1, 1], size=self.N, p=[0.9, 0.1])
-
-		self.A_i = 0.75
-	
-	def compute_celeb_influence(self, current_followers):
-		L_i = gumbel_r.rvs(loc=0, scale=1.0)
-		k_ratio = current_followers / self.N
-		effective_quality = self.alpha * self.A_i + (1 - self.alpha) * max(0, L_i)
-		h_i = effective_quality * (k_ratio**self.gamma)
-		return h_i
-
-	def run(self, steps=1000, J=1.2, initial_temp=5.0, cooling_rate=0.97):
-		history = []
-		T = initial_temp
-
-		for step in range(steps):
-			m = np.mean(self.states)
-			followers = np.sum(self.states == 1)
-			h_i = self.compute_celeb_influence(followers)
-			eff_field = J * m + h_i + self.mu_bias
-			p_fanatic = 1.0 / (1.0 + np.exp(-2.0 * eff_field / T))
-			self.states = np.where(np.random.rand(self.N) < p_fanatic, 1, -1)
-			history.append(
-					{
-						"step": step,
-						"temperature_T": T,
-						"order_parameter_m": m,
-						"fanatic_ratio": followers / self.N,
-						"celeb_influence_h": h_i,
-					}
-			)
-			T *= cooling_rate
-		return pd.DataFrame(history)
-
-if __name__ == "__main__":
-	sim = CelebrityFanaticismSim(num_agents=10000)
-	df_result = sim.run(steps=1000, J=1.2, initial_temp=5.0)
-	df_result.to_parquet("fanaticism_simulation_log.parquet")
-	print("Simulation completed. Saved to 'fanaticism_simulation_log.parquet'.")
-	print(df_result.tail(10))
-</file>
-
-<file path="src/simulation/plot_phase_transition.py">
-import pandas as pd
-import matplotlib.pyplot as plt
-
-df = pd.read_parquet("fanaticism_simulation_log.parquet")
-
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-color_m = 'tab:red'
-ax1.set_xlabel('Step', fontsize=11)
-ax1.set_ylabel('Order Parameter (m)', color=color_m, fontsize=11)
-ax1.plot(df['step'], df['order_parameter_m'], color=color_m, linewidth=2.5, label='Order Parameter (m)')
-ax1.tick_params(axis='y', labelcolor=color_m)
-ax1.set_ylim(-1.1, 1.1)
-ax1_twin = ax1.twinx()
-color_t = 'tab:blue'
-ax1_twin.set_ylabel('Tempertature / Stress (T)', color=color_t, fontsize=11)
-ax1_twin.plot(df['step'], df['temperature_T'], color=color_t, linestyle='--', linewidth=1.5, label='Temperature (T)')
-ax1.set_title('Time Series: Jump to Fanaticism', fontsize=12, fontweight='bold')
-ax1.grid(True, alpha=0.3)
-
-ax2.plot(df['temperature_T'], df['order_parameter_m'], marker='o', markersize=4, color='purple', linestyle='-')
-ax2.invert_xaxis()
-ax2.set_xlabel('Social Stress / Temperature (T) [Decaying]', fontsize=11)
-ax2.set_ylabel('Order Parameter (m)', fontsize=11)
-ax2.set_title('Phase Diagram: Criticality Boundary', fontsize=12, fontweight='bold')
-ax2.set_ylim(-1.1, 1.1)
-ax2.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig("phase_transition_plot.png", dpi=300)
-print("Graph saved successfully as 'phase_transition_plot.png'.")
-</file>
-
-<file path="src/simulation/requirements.txt">
-numpy
-pandas
-scipy
-pyarrow
-matplotlib
-</file>
-
-<file path="src/simulation-py/app/__init__.py">
-
-</file>
-
-<file path="src/simulation-py/app/agent.py">
-import asyncio
-import random
-import time
-import logging
-from app.models import TelemetryData
-from app.client import GatewayClient
-
-class Agent:
-	def __init__(self, agent_id: str, client: GatewayClient):
-		self.agent_id = agent_id
-		self.client = client
-		self.is_running = False
-	
-	async def run(self, interval_sec: float = 1.0):
-		self.is_running = True
-		logging.info(f"Agent [{self.agent_id}] started.")
-
-		while self.is_running:
-			telemetry = TelemetryData(
-					agent_id=self.agent_id,
-					timestamp=time.time(),
-					status="ACTIVE",
-					metrics={
-						"cpu_usage": round(random.uniform(10.0, 90.0), 2),
-						"memory_mb": random.randint(128, 1024),
-					}
-			)
-
-			await self.client.send_telemetry(telemetry.to_dict())
-			jitter = random.uniform(-0.1, 0.1)
-			await asyncio.sleep(max(0.1, interval_sec + jitter))
-
-	def stop(self):
-		self.is_running = False
-</file>
-
-<file path="src/simulation-py/app/client.py">
-import socket
-import json
-import logging
-
-class GatewayClient:
-	def __init__(self, host: str = "127.0.0.1", port: int = 8080):
-		self.host = host
-		self.port = port
-		self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-	async def send_telemetry(self, data: dict) -> bool:
-		try:
-			payload = json.dumps(data).encode('utf-8')
-			self.sock.sendto(payload, (self.host, self.port))
-			return True
-		except Exception as e:
-			logging.error(f"Failed to send UDP packet: {e}")
-			return False
-	
-	async def close(self):
-		self.sock.close()
-</file>
-
-<file path="src/simulation-py/app/models.py">
-import time
-from dataclasses import dataclass, asdict
-
-@dataclass
-class TelemetryData:
-	agent_id: str
-	timestamp: float
-	status: str
-	metrics: dict
-
-	def to_dict(self) -> dict:
-		return asdict(self)
-</file>
-
-<file path="src/simulation-py/requirement.txt">
-httpx?=0.27.0
-</file>
-
-<file path="src/simulation-py/social_stream_sim.py">
-import socket
-import struct
-import time
-import math
-import random
-import numpy as np
-
-GATEWAY_ADDR = ("127.0.0.1", 8080)
-MAGIC_SOCI = 0x534F4349;
-
-def simulate_social_dynamics(steps=1000):
-	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-	print(f"[Social Sim] Streaming social sentiment packets to {GATEWAY_ADDR}...")
-
-	N = 1000
-	states = np.random.choice([-1, 1], size=N, p=[0.5, 0.5])
-	T = 4.0
-	J = 1.2
-
-	try:
-		for step in range(steps):
-			m = np.mean(states)
-
-			h_ext = np.random.gumbel(0, 0.5) if random.random() < 0.05 else 0.0
-			eff_field = J * m + h_ext
-
-			p_positive = 1.0 / (1.0 + np.exp(-2.0 * eff_field / max(0.1, T)))
-			states = np.where(np.random.rand(N) < p_positive, 1, -1)
-
-			sentiment_index = float(np.mean(states))
-			post_volume = float(N * (1.0 + abs(sentiment_index) * 2.0) + random.uniform(-50, 50))
-			T *= 0.995
-
-			timestamp_ms = int(time.time() * 1000)
-			packet = struct.pack("<iqff", MAGIC_SOCI, timestamp_ms, sentiment_index, post_volume)
-
-			sock.sendto(packet, GATEWAY_ADDR)
-			time.sleep(0.01)
-
-			if step % 100 = 0:
-				print(f"[Step {step:04d}] Temp: {T:.2f} | Sentiment (m): {ssentiment_index:+.3f} | Posts/s: {post_volume:.0f}")
-
-	finally:
-		sock.close()
-
-if __name__ == "__main__":
-	simulate_social_dynamics()
-</file>
-
-<file path="src/solver-julia/src/tipping_solver.jl">
-using Pkg
-
-Pkg.activate(@__DIR__)
-
-required_pkgs = ["DifferentialEquations", "StochasticDiffEq", "JSON3", "HTTP"]
-for pkg in required_pkgs
-	if !haskey(Pkg.project().dependencies, pkg)
-		println("[Julia Setup] Installing missing package: $pkg...")
-		Pkg.add(pkg)
-	end
-end
-
-module TippingSolver
-
-using DifferentialEquations
-using StochasticDiffEq
-using JSON3
-using HTTP
-
-function f_drift!(du, u, p, t)
-	h, b, sigma = p
-	du[1] = b * u[1] - u[1]^3 + h
-
-	return nothing
-end
-
-function g_diffusion!(du, u, p, t)
-	h, b, sigma = p
-	du[1] = sigma
-	return nothing
-end
-
-function solve_tipping_probability(x0::Float64, h::Float64, b::Float64, sigma::Float64; num_trajectories::Int=100, tmax::Float64=60.0)
-	u0 = [x0]
-	tspan = (0.0, tmax)
-	p = (h, b, sigma)
-
-	prob = SDEProblem(f_drift!, g_diffusion!, u0, tspan, p)
-
-	condition(u, t, integrator) = abs(u) >= 0.8
-	affect!(integrator) = terminate!(integrator)
-	cb = DiscreteCallback(condition, affect!)
-
-	prob_func = (prob, i, repeat) -> remake(prob, u0 = copy(prob.u0))
-
-	ensemble_prob = EnsembleProblem(prob)
-
-	sol = solve(ensemble_prob, SRIW1(), EnsembleThreads();
-							trajectories=num_trajectories, callback=cb, save_everystep=false)
-
-	tipped_count = 0
-	tipping_times = Float64[]
-
-	for s in sol
-		if abs(s.u[end][1]) >= 0.8
-			tipped_count += 1
-			push!(tipping_times, s.t[end])
-		end
-	end
-
-	tipping_prob = tipped_count / num_trajectories
-	mean_tipping_time = isempty(tipping_times) ? -1.0 : sum(tipping_times) / length(tipping_times)
-
-	return Dict(
-			"tipping_probability" => tipping_prob,
-			"mean_tipping_time_sec" => mean_tipping_time,
-			"simulated_trajectories" => num_trajectories
-	)
-end
-
-function warmup()
-	print("[Julia] Comiling SDE Solver (Warming)...")
-	try
-		solve_tipping_probability(0.1, 0.0, 1.0, 0.1; num_trajectories=2, tmax=5.0)
-		println("Done!")
-	catch e
-		println("Warmup failed: ", e)
-	end
-end
-
-function start_server(port::Int=8081)
-	warmup()
-	println("[Julia Solver] SDE Tipping Engine listening on port $port...")
-	HTTP.serve("0.0.0.0", port) do req::HTTP.Request
-		path = HTTP.URI(req.target).path
-		println("[Julia Req] Method: ", req.method, " | Path: ", path)
-		clean_path = rstrip(path, '/')
-		if (clean_path == "/solve" || clean_path == "/solve_tipping") && req.method == "POST"
-			println("[Julit] Received tequest. Solving SDE...")
-			try
-				data = JSON3.read(String(req.body))
-
-				x0 = Float64(get(data, "sentiment_x0", get(data, "initial_queue", 0.1)))
-				h =	Float64(get(data, "media_h", 0.0))
-				b =	Float64(get(data, "coupling_b", 1.0))
-				s =	Float64(get(data, "variance_sigma", 0.1))
-
-				res = solve_tipping_probability(x0, h, b, s)
-
-				println("[Julia] Solved! Sending response.")
-				return HTTP.Response(200, ["Content-Type" => "application/json"], JSON3.write(res))
-			catch e
-				println("[Julia Error] Exception during solve: ", e)
-				return HTTP.Response(500, ["Content-Type" => "application/json"], JSON3.write(Dict("error" => string(e))))
-			end
-		end
-		return HTTP.Response(404, "Not Found")
-	end
-end
-
-end # module
-
-	
-TippingSolver.start_server(8081)
-</file>
-
-<file path="src/solver-julia/Dockerfile">
-FROM julia:1.10
-
-WORKDIR /app
-
-RUN julia -e 'using Pkg; Pkg.add(["DifferentialEquations", "HTTP", "JSON3"])'
-
-COPY . .
-
-EXPOSE 8081
-
-CMD ["julia", "src/main.jl"]
-</file>
-
-<file path="src/solver-julia/Project.toml">
-[deps]
-DifferentialEquations = "0c46a032-eb83-5123-abaf-570d42b7fbaa"
-HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
-JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
-StochasticDiffEq = "789caeaf-c7a9-5a7d-9973-96adeb23e2a0"
-</file>
-
-<file path="src/stats-r/src/causal_discovery.R">
-library(plumber)
-library(jsonlite)
-library(pcalg)
-
-#* @post /discover_causality
-function(req) {
-	raw_body <- req$postBody
-	data_list <- fromJSON(raw_body)
-
-	df <- as.data.frame(data_list$metrics)
-	var_names <- colnames(df)
-	num_vars <- ncol(df)
-
-	if (nrow(df) < 20) {
-		return(list(error = "Insufficient sample size for causal discovery. Need at least 20 time steps."))
-	}
-
-	suffStat <- list(C = cor(df), n = nrow(df))
-	pc_fit <- pc(suffStat = suffStat, indepTest = gaussCItest, alpha = 0.05, labels = var_names, verbose = FALSE)
-	adj_matrix <- as(pc_fit@graph, "matrix")
-
-	in_degrees <- colSums(adj_matrix != 0)
-	out_degrees <- rowSums(adj_matrix != 0)
-
-	root_candidates <- names(which(out_degrees > 0 & in_degrees == 0))
-
-	if (length(root_candidates) == 0) {
-		root_cause <- names(which.max(out_degrees))
-	} else {
-		root_cause <- root_candidates[1]
-	}
-
-	return(list(
-		status = "success",
-		root_cause = root_cause,
-		causal_edges = build_edge_list(adj_matrix, var_names),
-		matrix = adj_matrix
-	))
-}
-
-build_edge_list <- function(adj_mat, labels) {
-	edges <- list()
-	n <- length(labels)
-	for (i in 1:n) {
-		for (j in 1:n) {
-			if (adj_mat[i, j] != 0) {
-				edges[[length(edges) + 1]] <- list(
-					from = labels[i],
-					to = labels[j],
-					weight = unname(adj_mat[i, j])
-				)
-			}
-		}
-	}
-	return(edges)
-}
-</file>
-
 <file path="src/stats-r/Dockerfile">
 FROM r-base:latest
 
@@ -5641,33 +5457,6 @@ body {
 	},
 	"include": ["src/**/*"]
 }
-</file>
-
-<file path="src/docker-compose.yml">
-version: '3.8'
-
-services:
-  stats-r:
-    build:
-      context: ./stats-r
-      dockerfile: Dockerfile
-    container_name: structura-stats-r
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./stats-r:/app
-    restart: unless-stopped
-
-  solver-julia:
-    build:
-      context: ./solver-julia
-      dockerfile: Dockerfile
-    container_name: structura-solver-julia
-    ports:
-      - "8081:8081"
-    volumes:
-      - ./solver-julia:/app
-    restart: unless-stopped
 </file>
 
 <file path=".gitignore">
@@ -6507,6 +6296,191 @@ if __name__ == "__main__":
 	asyncio.run(run_simulator())
 </file>
 
+<file path="src/solver-julia/src/tipping_solver.jl">
+using Pkg
+
+Pkg.activate(@__DIR__)
+
+required_pkgs = ["DifferentialEquations", "StochasticDiffEq", "JSON3", "HTTP"]
+for pkg in required_pkgs
+	if !haskey(Pkg.project().dependencies, pkg)
+		println("[Julia Setup] Installing missing package: $pkg...")
+		Pkg.add(pkg)
+	end
+end
+
+module TippingSolver
+
+using DifferentialEquations
+using StochasticDiffEq
+using JSON3
+using HTTP
+
+function f_drift!(du, u, p, t)
+	h, b, sigma = p
+	du[1] = b * u[1] - u[1]^3 + h
+
+	return nothing
+end
+
+function g_diffusion!(du, u, p, t)
+	h, b, sigma = p
+	du[1] = sigma
+	return nothing
+end
+
+function solve_tipping_probability(x0::Float64, h::Float64, b::Float64, sigma::Float64; num_trajectories::Int=100, tmax::Float64=60.0)
+	u0 = [x0]
+	tspan = (0.0, tmax)
+	p = (h, b, sigma)
+
+	prob = SDEProblem(f_drift!, g_diffusion!, u0, tspan, p)
+
+	condition(u, t, integrator) = abs(u) >= 0.8
+	affect!(integrator) = terminate!(integrator)
+	cb = DiscreteCallback(condition, affect!)
+
+	prob_func = (prob, i, repeat) -> remake(prob, u0 = copy(prob.u0))
+
+	ensemble_prob = EnsembleProblem(prob)
+
+	sol = solve(ensemble_prob, SRIW1(), EnsembleThreads();
+							trajectories=num_trajectories, callback=cb, save_everystep=false)
+
+	tipped_count = 0
+	tipping_times = Float64[]
+
+	for s in sol
+		if abs(s.u[end][1]) >= 0.8
+			tipped_count += 1
+			push!(tipping_times, s.t[end])
+		end
+	end
+
+	tipping_prob = tipped_count / num_trajectories
+	mean_tipping_time = isempty(tipping_times) ? -1.0 : sum(tipping_times) / length(tipping_times)
+
+	return Dict(
+			"tipping_probability" => tipping_prob,
+			"mean_tipping_time_sec" => mean_tipping_time,
+			"simulated_trajectories" => num_trajectories
+	)
+end
+
+function warmup()
+	print("[Julia] Comiling SDE Solver (Warming)...")
+	try
+		solve_tipping_probability(0.1, 0.0, 1.0, 0.1; num_trajectories=2, tmax=5.0)
+		println("Done!")
+	catch e
+		println("Warmup failed: ", e)
+	end
+end
+
+function start_server(port::Int=8081)
+	warmup()
+	println("[Julia Solver] SDE Tipping Engine listening on port $port...")
+	HTTP.serve("0.0.0.0", port) do req::HTTP.Request
+		path = HTTP.URI(req.target).path
+		println("[Julia Req] Method: ", req.method, " | Path: ", path)
+		clean_path = rstrip(path, '/')
+		if (clean_path == "/solve" || clean_path == "/solve_tipping") && req.method == "POST"
+			println("[Julit] Received tequest. Solving SDE...")
+			try
+				data = JSON3.read(String(req.body))
+
+				x0 = Float64(get(data, "sentiment_x0", get(data, "initial_queue", 0.1)))
+				h =	Float64(get(data, "media_h", 0.0))
+				b =	Float64(get(data, "coupling_b", 1.0))
+				s =	Float64(get(data, "variance_sigma", 0.1))
+
+				res = solve_tipping_probability(x0, h, b, s)
+
+				println("[Julia] Solved! Sending response.")
+				return HTTP.Response(200, ["Content-Type" => "application/json"], JSON3.write(res))
+			catch e
+				println("[Julia Error] Exception during solve: ", e)
+				return HTTP.Response(500, ["Content-Type" => "application/json"], JSON3.write(Dict("error" => string(e))))
+			end
+		end
+		return HTTP.Response(404, "Not Found")
+	end
+end
+
+end # module
+
+	
+TippingSolver.start_server(8081)
+</file>
+
+<file path="src/solver-julia/Project.toml">
+[deps]
+DifferentialEquations = "0c46a032-eb83-5123-abaf-570d42b7fbaa"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+StochasticDiffEq = "789caeaf-c7a9-5a7d-9973-96adeb23e2a0"
+</file>
+
+<file path="src/stats-r/src/causal_discovery.R">
+library(plumber)
+library(jsonlite)
+library(pcalg)
+
+#* @post /discover_causality
+#* @serializer json list(auto_unbox = TRUE)
+function(req) {
+	raw_body <- req$postBody
+	data_list <- fromJSON(raw_body)
+
+	df <- as.data.frame(data_list$metrics)
+	var_names <- colnames(df)
+	num_vars <- ncol(df)
+
+	if (nrow(df) < 20) {
+		return(list(error = "Insufficient sample size for causal discovery. Need at least 20 time steps."))
+	}
+
+	suffStat <- list(C = cor(df), n = nrow(df))
+	pc_fit <- pc(suffStat = suffStat, indepTest = gaussCItest, alpha = 0.05, labels = var_names, verbose = FALSE)
+	adj_matrix <- as(pc_fit@graph, "matrix")
+
+	in_degrees <- colSums(adj_matrix != 0)
+	out_degrees <- rowSums(adj_matrix != 0)
+
+	root_candidates <- names(which(out_degrees > 0 & in_degrees == 0))
+
+	if (length(root_candidates) == 0) {
+		root_cause <- names(which.max(out_degrees))
+	} else {
+		root_cause <- root_candidates[1]
+	}
+
+	return(list(
+		status = "success",
+		root_cause = root_cause,
+		causal_edges = build_edge_list(adj_matrix, var_names),
+		matrix = adj_matrix
+	))
+}
+
+build_edge_list <- function(adj_mat, labels) {
+	edges <- list()
+	n <- length(labels)
+	for (i in 1:n) {
+		for (j in 1:n) {
+			if (adj_mat[i, j] != 0) {
+				edges[[length(edges) + 1]] <- list(
+					from = labels[i],
+					to = labels[j],
+					weight = unname(adj_mat[i, j])
+				)
+			}
+		}
+	}
+	return(edges)
+}
+</file>
+
 <file path="src/Structura.Tests/Structura.Tests.csproj">
 <Project Sdk="Microsoft.NET.Sdk">
 
@@ -6533,6 +6507,49 @@ if __name__ == "__main__":
   </ItemGroup>
 
 </Project>
+</file>
+
+<file path="src/docker-compose.yml">
+version: '3.8'
+
+services:
+  stats-r:
+    build:
+      context: ./stats-r
+      dockerfile: Dockerfile
+    container_name: structura-stats-r
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./stats-r:/app
+    restart: unless-stopped
+
+  solver-julia:
+    build:
+      context: ./solver-julia
+      dockerfile: Dockerfile
+    container_name: structura-solver-julia
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./solver-julia:/app
+    restart: unless-stopped
+  
+  gateway-go:
+    build:
+      context: ./gateway-go
+      dockerfile: Dockerfile
+    container_name: structura-gateway-go
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - R_SERVICE_URL=http://stats-r:8082
+      - JULIA_SERVICE_URL=http://solver-julia:8081
+    depends_on:
+      - stats-r
+      - solver-julia
+    restart: unless-stoppedp
 </file>
 
 <file path="src/backend-core/PacketProcessor.cs">
@@ -6848,6 +6865,45 @@ sudo go run cmd/main.go
 ```
 </file>
 
+<file path=".github/workflows/ci.yml">
+name: Gateway CI
+
+on:
+  push:
+    branches: [ main, "feature/**" ]
+  pull_request:
+    branches: [ main ]
+
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install dependencis
+        run: |
+          cd src/gateway-go
+          go mod download
+
+#      - name: Run Linter
+#        uses: golangci/golangci-lint-action@v4
+#        with:
+#          version: v1.60.0
+#          working-directory: gateway-go
+
+      - name: Run Unit Tests with Coverage
+        run: |
+          cd src/gateway-go
+          go test -v -coverprofile=coverage.out ./...
+</file>
+
 <file path="src/gateway-go/main.go">
 package main
 
@@ -6945,45 +7001,6 @@ func getEnv(key, defaultValue string) string {
 	}
 	return defaultValue
 }
-</file>
-
-<file path=".github/workflows/ci.yml">
-name: Gateway CI
-
-on:
-  push:
-    branches: [ main, "feature/**" ]
-  pull_request:
-    branches: [ main ]
-
-
-jobs:
-  test-and-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Install dependencis
-        run: |
-          cd src/gateway-go
-          go mod download
-
-#      - name: Run Linter
-#        uses: golangci/golangci-lint-action@v4
-#        with:
-#          version: v1.60.0
-#          working-directory: gateway-go
-
-      - name: Run Unit Tests with Coverage
-        run: |
-          cd src/gateway-go
-          go test -v -coverprofile=coverage.out ./...
 </file>
 
 </files>
