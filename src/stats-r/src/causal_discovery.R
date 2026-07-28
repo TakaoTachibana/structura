@@ -3,6 +3,7 @@ library(jsonlite)
 library(pcalg)
 
 #* @post /discover_causality
+#* @serializer json list(auto_unbox = TRUE)
 function(req) {
 	raw_body <- req$postBody
 	data_list <- fromJSON(raw_body)
