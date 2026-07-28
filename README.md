@@ -19,32 +19,36 @@ By running high-throughput baseline evaluations (variance fluctuations and autoc
 
 ## 🏗️ Multi-Tier Architecture & Data Flow
 
-  [ Kernel & Network Domain ]         [ Social Dynamics Stream ]
-   eBPF / gNMI / NetFlow               Sentiment (m) / Volume
-            │                                    │
-            └─────────────────┬──────────────────┘
-                              │ (UDP Stream / Zero-Alloc Sockets)
-                              ▼
-               ┌──────────────────────────────┐
-               │  Go Telemetry Gateway        │
-               │  - Async Multi-Protocol Recv │
-               │  - Parallel Orchestration    │
-               └──────────────┬───────────────┘
-                              │ (Unix Domain Socket / Memory Stream)
-                              ▼
-               ┌──────────────────────────────┐
-               │ C# Core Engine (.NET 10)     │
-               │ - AllocationFreeBuffer       │
-               │ - Streaming Criticality Eval │
-               └──────────────┬───────────────┘
-                              │ (HTTP Parallel Dispatch)
-              ┌───────────────┴───────────────┐
-              ▼                               ▼
-  ┌──────────────────────┐        ┌──────────────────────┐
-  │ Julia SDE Engine     │        │ R Causal & GAM Engine│
-  │ - Tipping Solver     │        │ - Causal Discovery   │
-  │ - Monte Carlo SRA1   │        │ - GAM Criticality    │
-  └──────────────────────┘        └──────────────────────┘
+```text
+  ┌───────────────────────────┐         ┌───────────────────────────┐
+  │  Kernel & Network Domain  │         │  Social Dynamics Stream   │
+  │  - eBPF / gNMI / NetFlow  │         │  - Sentiment (m) / Volume │
+  └─────────────┬─────────────┘         └─────────────┬─────────────┘
+                │                                     │
+                └──────────────────┬──────────────────┘
+                                   │ (UDP Stream / Zero-Alloc)
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │     Go Telemetry Gateway     │
+                    │  - Async Multi-Protocol Recv │
+                    │  - Parallel Orchestration    │
+                    └──────────────┬───────────────┘
+                                   │ (Unix Socket / Memory Stream)
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │   C# Core Engine (.NET 10)   │
+                    │  - AllocationFreeBuffer      │
+                    │  - Streaming Criticality Eval│
+                    └──────────────┬───────────────┘
+                                   │ (HTTP Parallel Dispatch)
+                  ┌────────────────┴─────────────────┐
+                  ▼                                  ▼
+   ┌──────────────────────────────┐   ┌──────────────────────────────┐
+   │       Julia SDE Engine       │   │    R Causal & GAM Engine     │
+   │  - Tipping Solver            │   │  - Causal Discovery          │
+   │  - Monte Carlo SRA1          │   │  - GAM Criticality           │
+   └──────────────────────────────┘   └──────────────────────────────┘
+```
 
 ---
 
@@ -91,29 +95,35 @@ By running high-throughput baseline evaluations (variance fluctuations and autoc
 
 Build and launch the complete stack (Go Gateway, Julia Solver, and R Analytics Engine):
 
-    git clone https://github.com/your-org/structura.git
-    cd structura/src
-    docker compose up --build
+```bash
+git clone [https://github.com/your-org/structura.git](https://github.com/your-org/structura.git)
+cd structura/src
+docker compose up --build
+```
 
 ### 2. Execute Data Stream Simulators
 
 In a separate terminal, install dependencies and launch the simulators to generate telemetry and social sentiment traffic:
 
-    cd src/simulation-py
-    pip install -r requirement.txt
+```bash
+cd src/simulation-py
+pip install -r requirement.txt
 
-    # Stream social sentiment dynamics
-    python social_stream_sim.py
+# Stream social sentiment dynamics
+python social_stream_sim.py
 
-    # Stream binary system telemetry packets
-    python main.py
+# Stream binary system telemetry packets
+python main.py
+```
 
 ### 3. Run Benchmark Tests
 
 Verify the zero-allocation performance invariants in the C# core processing engine:
 
-    cd src/Structura.Tests
-    dotnet test
+```bash
+cd src/Structura.Tests
+dotnet test
+```
 
 ---
 
