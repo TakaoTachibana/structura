@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: structura-stats-r
     ports:
-      - "8000:8000"
+      - "8082:8082"
     volumes:
       - ./stats-r:/app
     restart: unless-stopped
@@ -22,4 +22,20 @@ services:
     volumes:
       - ./solver-julia:/app
     restart: unless-stopped
+  
+  gateway-go:
+    build:
+      context: ./gateway-go
+      dockerfile: Dockerfile
+    container_name: structura-gateway-go
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - R_SERVICE_URL=http://stats-r:8082
+      - JULIA_SERVICE_URL=http://solver-julia:8081
+    depends_on:
+      - stats-r
+      - solver-julia
+    restart: unless-stoppedp
 
